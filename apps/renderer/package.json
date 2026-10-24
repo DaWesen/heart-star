@@ -1,0 +1,25 @@
+{
+  "name": "@heart-star/renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@heart-star/character-schema": "workspace:*",
+    "@heart-star/protocol": "workspace:*",
+    "pixi.js": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.0"
+  },
+  "optionalDependencies": {
+    "@pixiv/three-vrm": "^3.0.0",
+    "three": "^0.169.0"
+  }
+}

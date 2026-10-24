@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Heart Star - Pet</title>
+    <style>
+      /* 透明窗口的根基：html 与 body 必须全透明，任何一处不透明都会出现黑边 */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        /* 桌宠窗口不需要文本选择 */
+        user-select: none;
+      }
+      #stage {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

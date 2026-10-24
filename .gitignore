@@ -1,0 +1,61 @@
+# ---------- 依赖 ----------
+node_modules/
+.pnpm-store/
+target/
+
+# 安装前旧依赖目录的本地残留（待手动删除，勿提交）
+_node_modules_stale/
+
+# ---------- 构建产物 ----------
+dist/
+build/
+apps/*/dist/
+apps/*/build/
+*.tsbuildinfo
+
+# ---------- Tauri ----------
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+
+# ---------- 角色资产 ----------
+# 体积大、含第三方授权素材，走独立资产仓库或 CDN 分发，不入库
+assets/characters/*
+!assets/characters/.gitkeep
+
+# ---------- 环境变量与密钥 ----------
+.env
+.env.*
+!.env.example
+*.local
+secrets/
+
+# ---------- 代码签名证书（绝不入库）----------
+*.pfx
+*.p12
+*.key
+*.keystore
+signing/
+
+# ---------- 日志与运行时 ----------
+*.log
+logs/
+runtime/
+
+# ---------- 测试与缓存 ----------
+coverage/
+.vitest/
+playwright-report/
+
+# ---------- 编辑器与工具缓存 ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# IDE 项目数据（本地会话与索引，不入库）
+.codebuddy/
+# 构建工具缓存
+.vite/
+.eslintcache

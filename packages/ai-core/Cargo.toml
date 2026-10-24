@@ -1,0 +1,13 @@
+[package]
+name = "ai-core"
+version = "0.1.0"
+edition = "2021"
+
+# AI 侧车：记忆 / 检索 / ASR / TTS / LLM 编排。
+# 骨架阶段只保留 serde 与 tokio，LLM SDK 与 ONNX Runtime 在 M4 接入时再补，
+# 避免早期引入重型依赖拖慢编译。
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -21,9 +21,22 @@ apps/desktop/src-tauri/target/
 packages/ai-core/Cargo.lock
 
 # ---------- 角色资产 ----------
-# 体积大、含第三方授权素材，走独立资产仓库或 CDN 分发，不入库
-assets/characters/*
-!assets/characters/.gitkeep
+# 二进制素材（moc3 / 贴图 / 动作）体积大，且各自受授权条款约束，走独立分发，不入库。
+# manifest.json 等文本元数据**仍入库**：它是构建期校验的输入，
+# 丢了就无法在 CI 或新克隆里验证角色包结构。
+assets/characters/*/runtime/
+assets/characters/*/*.moc3
+assets/characters/*/*.cmo3
+assets/characters/*/*.can3
+assets/characters/*/*.png
+# Live2D 运行时配置与动作/表情数据。随模型包一起分发，不属于"结构元数据"：
+# 它们体量大（单个 motion3 常有十几 KB，一个模型十几个），且与美术产出强绑定。
+# 只有 runtime/ 之外平铺布局的角色包会撞上这几条，先立规则免得悄悄混进仓库。
+assets/characters/*/*.model3.json
+assets/characters/*/*.motion3.json
+assets/characters/*/*.exp3.json
+assets/characters/*/*.physics3.json
+assets/characters/*/*.cdi3.json
 
 # ---------- 环境变量与密钥 ----------
 .env

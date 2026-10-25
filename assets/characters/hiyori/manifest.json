@@ -1,0 +1,41 @@
+{
+  "id": "hiyori",
+  "kind": "live2d",
+  "version": 1,
+  "displayName": "桃濑日和",
+  "entry": "runtime/hiyori_pro_t11.model3.json",
+  "anchor": { "x": 0.5, "y": 1 },
+  "defaultScale": 0.35,
+  "semantics": {
+    "lookX": "ParamEyeBallX",
+    "lookY": "ParamEyeBallY",
+    "lipSync": "ParamMouthOpenY",
+    "breath": "ParamBreath",
+    "blink": ["ParamEyeLOpen", "ParamEyeROpen"]
+  },
+  "hitAreas": {
+    "body": { "type": "drawable", "target": "HitArea" }
+  },
+  "motions": {
+    "idle": [
+      "motion/hiyori_m01.motion3.json",
+      "motion/hiyori_m02.motion3.json",
+      "motion/hiyori_m05.motion3.json"
+    ],
+    "tap_body": ["motion/hiyori_m09.motion3.json"]
+  },
+  "expressions": {},
+  "rig": {
+    "type": "none",
+    "bones": {},
+    "constraints": {},
+    "ikChains": [],
+    "springBones": []
+  },
+  "capabilities": {
+    "proceduralPose": false,
+    "ik": false,
+    "additiveLayer": false,
+    "physics": "builtin"
+  }
+}

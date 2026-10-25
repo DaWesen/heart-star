@@ -26,6 +26,9 @@ importers:
       '@heart-star/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@tauri-apps/api':
+        specifier: ^2.12.4
+        version: 2.12.4
       react:
         specifier: ^18.3.1
         version: 18.3.1

@@ -9,7 +9,9 @@
   "scripts": {
     "validate:characters": "pnpm --filter @heart-star/character-schema exec tsx src/cli.ts",
     "typecheck": "pnpm -r typecheck",
-    "build": "pnpm -r build",
+    "dev": "node scripts/dev.mjs",
+    "dev:app": "cd apps/desktop && tauri dev",
+    "build": "pnpm --filter @heart-star/renderer build && pnpm --filter @heart-star/panel build",
     "gen:rust": "pnpm --filter @heart-star/protocol gen:rust"
   },
   "devDependencies": {

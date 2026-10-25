@@ -24,8 +24,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOZORDER, WM_DPICHANGED, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCPAINT, WNDPROC,
 };
 
-use super::dpi;
-
 /// 原窗口过程。窗口过程可能被重入，所以只保存函数指针本身（fn 指针天然 Sync），
 /// 且**取值后立即释放锁**再调用 —— 绝不能持锁调用，否则嵌套消息会死锁。
 static PREV_PROC: std::sync::Mutex<Option<WNDPROC>> = std::sync::Mutex::new(None);
@@ -61,8 +59,9 @@ extern "system" fn pet_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
         }
-        // 窗口已经落位，此时读到的才是新显示器的 DPI
-        dpi::sync_renderer_scale(hwnd);
+        // 窗口已落位，此后 `GetDpiForWindow` 读到的才是新显示器的 DPI。
+        // 渲染层的同步交给监管线程（见 dpi.rs 模块文档）——窗口过程里没有
+        // WebviewWindow，发不出 IPC，硬凑只会把一个无效调用藏在这里。
         return LRESULT(0);
     }
 

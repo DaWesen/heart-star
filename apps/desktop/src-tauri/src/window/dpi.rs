@@ -12,6 +12,12 @@
 //!  2. 窗口几何一律用**物理像素**。逻辑尺寸只出现在与配置/渲染层对话时。
 //!     `GetWindowRect` 与 `GetCursorPos` 在 PMv2 下同处物理坐标系，
 //!     这正是 `hook.rs` 里矩形包含判定能直接成立的前提，不要改成逻辑坐标。
+//!
+//! 缩放系数变化后**由谁通知渲染层**：不是本模块。
+//! 窗口过程（`proc.rs` 的 WM_DPICHANGED）与状态机（`PetWindow`）都只握着 HWND，
+//! 拿不到 `WebviewWindow`，发不出 IPC。统一由 `lib.rs` 的形态监管线程轮询
+//! `renderer_scale()` 并重发 `setBounds`（见 `ipc::announce`）。
+//! 在这里假装"同步了"只会掩盖那条链路其实没接上的事实。
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::HiDpi::{
@@ -47,17 +53,4 @@ pub fn scale_for(hwnd: HWND) -> f64 {
         return 1.0;
     }
     dpi as f64 / BASELINE_DPI as f64
-}
-
-/// 迁移/跨屏/DPI 变更后重算缩放系数并同步渲染层。
-///
-/// 调用顺序很重要：**必须先让窗口完成迁移**，再读 DPI，否则拿到的是旧显示器的值。
-/// `PetWindow` 的形态切换与 `proc.rs` 的 `WM_DPICHANGED` 都遵守这一点。
-///
-/// TODO(M1-IPC)：拿到 scale 后需通过 IPC 下发 `setBounds` + 缩放系数给渲染层，
-/// 由渲染层重设 PixiJS resolution / three.js setPixelRatio。
-/// 这里先返回 scale 供调用方持有——IPC 通道本身是 M1 的另一个待办项，
-/// 且事件名必须来自 `packages/protocol`（唯一真源），不宜在此临时发明。
-pub fn sync_renderer_scale(hwnd: HWND) -> f64 {
-    scale_for(hwnd)
 }

@@ -15,18 +15,20 @@
 //! 全部排查过，都不是它。根因在 `proc.rs` —— 无边框窗口收到 `WM_NCACTIVATE` 时，
 //! `DefWindowProc` 会按"停用态"重画一遍非客户区。必须在窗口过程里拦截，样式位做不到。
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{GetLastError, SetLastError, ERROR_SUCCESS, HWND};
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_ALLOW_NCPAINT, DWMWA_BORDER_COLOR,
     DWMWA_CAPTION_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_TRANSITIONS_FORCEDISABLED,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_BORDER, WS_CAPTION, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_STATICEDGE,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
-    WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WINDOW_LONG_PTR_INDEX, WS_BORDER,
+    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_EX_DLGMODALFRAME, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_STATICEDGE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE, WS_MAXIMIZEBOX,
+    WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
 };
+
+use crate::logging::log_warn;
 
 /// 边框相关样式位。透明窗口只要残留其中任何一个，就会表现为一圈 1px 灰边。
 const BORDER_BITS: u32 = WS_CAPTION.0
@@ -41,10 +43,29 @@ const EX_BORDER_BITS: u32 =
 
 use super::WindowError;
 
+/// 读窗口样式位。
+///
+/// `GetWindowLongPtrW` 的返回值无法区分失败与"样式真的是 0"，只看返回值会误判。
+/// 必须先清零 last-error 再调用 —— 这是 Win32 的固定套路，漏掉清零就会把
+/// 上一次调用残留的错误码当成本次失败。
+fn get_style(hwnd: HWND, index: WINDOW_LONG_PTR_INDEX) -> Result<u32, WindowError> {
+    unsafe {
+        SetLastError(ERROR_SUCCESS);
+        let value = GetWindowLongPtrW(hwnd, index);
+        if value == 0 && GetLastError() != ERROR_SUCCESS {
+            return Err(WindowError::StyleFailed);
+        }
+        Ok(value as u32)
+    }
+}
+
 /// 禁用 DWM 非客户区渲染。
 ///
 /// 清掉 WS_CAPTION 等边框样式位还不够：DWM 仍可能自行绘制一层非客户区，
 /// 必须显式关掉渲染策略，并禁止非客户区绘制。
+///
+/// 失败不向上传播：DWM 属性只影响观感，不阻断窗口形态迁移，
+/// 让它把整个 `apply_*_style` 拖失败是代价不成比例的。
 pub fn disable_nonclient_rendering(hwnd: HWND) {
     unsafe {
         let policy = DWMNCRP_DISABLED;
@@ -54,7 +75,7 @@ pub fn disable_nonclient_rendering(hwnd: HWND) {
             &policy as *const _ as *const core::ffi::c_void,
             core::mem::size_of::<i32>() as u32,
         ) {
-            eprintln!("[heart-star] DWM 禁用非客户区失败: {e:?}");
+            log_warn!("DWM 禁用非客户区失败: {e:?}");
         }
 
         let allow_ncpaint: i32 = 0; // FALSE
@@ -105,25 +126,18 @@ pub fn apply_desktop_style(hwnd: HWND) -> Result<(), WindowError> {
 
     unsafe {
         // ① 清理普通样式中的边框位（GWL_STYLE）
-        let normal = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if normal == 0 {
-            return Err(WindowError::StyleFailed);
-        }
+        let normal = get_style(hwnd, GWL_STYLE)?;
         // 必须显式置 WS_POPUP：只清除边框位而不指定窗口类型，
         // Windows 会回退绘制标题栏（表现为顶部一条白框，带窗口标题文字）。
-        let cleaned = (normal as u32 & !BORDER_BITS) | WS_POPUP.0;
+        let cleaned = (normal & !BORDER_BITS) | WS_POPUP.0;
         let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, cleaned as isize);
 
         // ② 扩展样式：穿透 + 不进任务栏 + 不抢焦点，并清除 layered 与边框位
-        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if current == 0 {
-            return Err(WindowError::StyleFailed);
-        }
+        let current = get_style(hwnd, GWL_EXSTYLE)?;
 
-        let style =
-            ((current as u32 | WS_EX_TRANSPARENT.0 | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0)
-                & !WS_EX_LAYERED.0)
-                & !EX_BORDER_BITS;
+        let style = ((current | WS_EX_TRANSPARENT.0 | WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0)
+            & !WS_EX_LAYERED.0)
+            & !EX_BORDER_BITS;
 
         let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style as isize);
 
@@ -145,20 +159,14 @@ pub fn apply_desktop_style(hwnd: HWND) -> Result<(), WindowError> {
 ///
 /// 这是钩子的核心动作：宠物窗口默认带 WS_EX_TRANSPARENT（收不到鼠标消息），
 /// 钩子判定指针进入宠物区域后，靠这个函数临时取消穿透，使其可交互。
-///
-/// 注意：`GetWindowLongPtrW` 返回 0 既可能是失败、也可能是样式真的为 0。
-/// 严谨做法是配合 `GetLastError` 判断，M1 联调时补齐。
 pub fn set_click_through(hwnd: HWND, enable: bool) -> Result<(), WindowError> {
     unsafe {
-        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if current == 0 {
-            return Err(WindowError::StyleFailed);
-        }
+        let current = get_style(hwnd, GWL_EXSTYLE)?;
 
         let style = if enable {
-            current as u32 | WS_EX_TRANSPARENT.0
+            current | WS_EX_TRANSPARENT.0
         } else {
-            current as u32 & !WS_EX_TRANSPARENT.0
+            current & !WS_EX_TRANSPARENT.0
         };
 
         let _ = SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style as isize);
@@ -180,13 +188,10 @@ pub fn set_click_through(hwnd: HWND, enable: bool) -> Result<(), WindowError> {
 /// 面板形态：去掉穿透（子窗口需要正常接收鼠标消息），加 WS_CHILD
 pub fn apply_panel_style(hwnd: HWND) -> Result<(), WindowError> {
     unsafe {
-        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if current == 0 {
-            return Err(WindowError::StyleFailed);
-        }
+        let current = get_style(hwnd, GWL_EXSTYLE)?;
 
         // 清除桌面形态的三个扩展位：子窗口需要正常接收鼠标消息
-        let style = current as u32
+        let style = current
             & !WS_EX_TRANSPARENT.0
             & !WS_EX_TOOLWINDOW.0
             & !WS_EX_NOACTIVATE.0
@@ -197,11 +202,8 @@ pub fn apply_panel_style(hwnd: HWND) -> Result<(), WindowError> {
         // 面板形态要变成子窗口：移除 WS_POPUP，置 WS_CHILD。
         // WS_CHILD 属于普通样式位（GWL_STYLE），且必须在 SetParent 之后置位才稳定，
         // 所以这里只管样式位，迁移顺序由 PetWindow 状态机保证。
-        let normal = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if normal == 0 {
-            return Err(WindowError::StyleFailed);
-        }
-        let cleaned = (normal as u32 & !BORDER_BITS & !WS_POPUP.0) | WS_CHILD.0;
+        let normal = get_style(hwnd, GWL_STYLE)?;
+        let cleaned = (normal & !BORDER_BITS & !WS_POPUP.0) | WS_CHILD.0;
         let _ = SetWindowLongPtrW(hwnd, GWL_STYLE, cleaned as isize);
         let _ = SetWindowPos(
             hwnd,

@@ -22,6 +22,8 @@ pub mod style;
 use std::fmt;
 use windows::Win32::Foundation::HWND;
 
+use crate::logging::{log, log_warn};
+
 /// 宠物窗口形态
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Form {
@@ -73,11 +75,23 @@ pub struct HitRegion {
     pub height: f32,
 }
 
+/// 尚不知道窗口真实尺寸时的兜底矩形（物理像素）。
+/// 只在 `init` 之前就发生 `to_desktop` 这种顺序错误时才会用到。
+const FALLBACK_RECT: host::Rect = host::Rect {
+    x: 100,
+    y: 100,
+    width: 320,
+    height: 420,
+};
+
 pub struct PetWindow {
     hwnd: HWND,
     form: Form,
-    /// 桌面形态下的最后位置，用于从面板返回时原位恢复
-    last_desktop_pos: (i32, i32),
+    /// 桌面形态下的最后一个矩形（物理像素），用于从面板返回时原位恢复。
+    ///
+    /// 必须**连尺寸一起存**：只存 x/y 会让 `SetWindowPos` 收到 0×0，
+    /// 宠物从面板回到桌面时直接塌成一个点，且看不出是哪里出的错。
+    last_desktop_rect: host::Rect,
     hook: Option<hook::HookHandle>,
 }
 
@@ -89,16 +103,26 @@ unsafe impl Sync for PetWindow {}
 
 impl PetWindow {
     pub fn new(hwnd: HWND) -> Self {
+        // 趁窗口还存在就把初始矩形读下来。等到 `to_desktop` 时窗口可能已经
+        // 挂在面板里，那时读到的就不是桌面坐标了。
+        let initial = host::current_rect(hwnd);
+        let degenerate = initial.width <= 0 || initial.height <= 0;
+
         Self {
             hwnd,
             form: Form::Desktop,
-            last_desktop_pos: (100, 100),
+            last_desktop_rect: if degenerate { FALLBACK_RECT } else { initial },
             hook: None,
         }
     }
 
     pub fn form(&self) -> Form {
         self.form
+    }
+
+    /// 宠物窗口句柄。宿主探针等外部代码需要它才能发起迁移。
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
     }
 
     /// 窗口当前所在显示器的缩放系数（1.0 = 100%）。
@@ -115,9 +139,9 @@ impl PetWindow {
         // 子类化窗口过程：抓住停用瞬间并在原地重绘。
         // 失败同样不致命，只是退化成"横条会闪一下"。
         if proc::install(self.hwnd) {
-            eprintln!("[heart-star] 窗口过程已接管");
+            log!("窗口过程已接管");
         } else {
-            eprintln!("[heart-star] 警告：窗口过程接管失败");
+            log_warn!("窗口过程接管失败");
         }
         // 钩子失败不致命：退化为"始终穿透"，宠物仍可见只是不可交互。
         // 若在此返回 Err，一个钩子问题就会让宠物彻底不显示，代价不成比例。
@@ -138,7 +162,9 @@ impl PetWindow {
         if self.form == Form::Transitioning {
             return Err(WindowError::Busy);
         }
-        if host.is_invalid() {
+        // 与 ensure_valid 用同一个判定：句柄非空不等于窗口还在，
+        // 只看 is_invalid() 会漏掉"宿主已关闭"这种情况。
+        if !host::is_alive(host) {
             return Err(WindowError::InvalidHost);
         }
 
@@ -176,47 +202,50 @@ impl PetWindow {
     /// 由主循环低频轮询 + 面板退出事件共同触发。
     pub fn ensure_valid(&mut self) -> Result<(), WindowError> {
         match self.form {
-            Form::Panel(host) if host.is_invalid() => self.force_desktop(),
+            // 两个判定缺一不可：
+            //   is_alive   —— 宿主被销毁。句柄值此时依然非空，只判空会漏掉。
+            //   is_visible —— 宿主被隐藏。面板是"隐藏而非销毁"的，
+            //                 宠物挂在隐藏窗口上等于跟着一起消失，必须拉回桌面。
+            Form::Panel(host) if !host::is_alive(host) || !host::is_visible(host) => {
+                self.force_desktop()
+            }
             _ => Ok(()),
         }
     }
 
     fn try_to_panel(&mut self, host: HWND, area: host::Rect) -> Result<(), WindowError> {
+        // 先记下当前矩形再搬走。以前这里用的是硬编码初值，
+        // 从面板返回桌面时宠物会跳回屏幕左上角。
+        let current = host::current_rect(self.hwnd);
+        if current.width > 0 && current.height > 0 {
+            self.last_desktop_rect = current;
+        }
+
         host::hide(self.hwnd);
         style::apply_panel_style(self.hwnd)?;
         host::attach_to(self.hwnd, host)?;
         host::place(self.hwnd, area)?;
+        // 必须在显示之前提层，否则可能被面板的 WebView2 盖住
+        host::raise(self.hwnd);
         host::show(self.hwnd);
 
         // 子窗口正常接收鼠标消息，钩子必须卸载，否则重复判定
         if let Some(h) = self.hook.take() {
             hook::uninstall(h);
         }
-
-        // 跨 DPI 迁移后必须重算渲染分辨率
-        dpi::sync_renderer_scale(self.hwnd);
         Ok(())
     }
 
     fn try_to_desktop(&mut self) -> Result<(), WindowError> {
-        let (x, y) = self.last_desktop_pos;
         host::hide(self.hwnd);
         host::detach(self.hwnd)?;
         style::apply_desktop_style(self.hwnd)?;
-        host::place(
-            self.hwnd,
-            host::Rect {
-                x,
-                y,
-                ..Default::default()
-            },
-        )?;
+        // 用完整的最后一个矩形，而不是只还原 x/y
+        host::place(self.hwnd, self.last_desktop_rect)?;
         host::show(self.hwnd);
 
         // 桌面形态下窗口被穿透，收不到鼠标消息，必须靠全局钩子
         self.hook = Some(hook::install(self.hwnd)?);
-
-        dpi::sync_renderer_scale(self.hwnd);
         Ok(())
     }
 
@@ -225,6 +254,9 @@ impl PetWindow {
         host::hide(self.hwnd);
         let _ = host::detach(self.hwnd);
         let _ = style::apply_desktop_style(self.hwnd);
+        // 宿主没了的时候宠物还是个子窗口，坐标是宿主客户区坐标。
+        // 不摆回桌面矩形，它可能停在屏幕外——那和"宠物消失"没区别。
+        let _ = host::place(self.hwnd, self.last_desktop_rect);
         host::show(self.hwnd);
         if self.hook.is_none() {
             self.hook = hook::install(self.hwnd).ok();

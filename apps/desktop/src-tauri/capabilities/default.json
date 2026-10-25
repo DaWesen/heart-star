@@ -3,6 +3,9 @@
   "identifier": "default",
   "description": "Heart Star 默认权限。按最小权限原则授予，新增能力需显式加入。",
   "windows": ["main", "pet", "panel"],
+  "remote": {
+    "urls": ["http://localhost:5174"]
+  },
   "permissions": [
     "core:default",
     "core:window:default",

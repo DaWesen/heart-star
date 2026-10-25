@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.heartstar.desktop",
   "build": {
-    "beforeDevCommand": "pnpm --filter @heart-star/renderer dev",
-    "beforeBuildCommand": "pnpm --filter @heart-star/renderer build",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
     "devUrl": "http://localhost:5173",
     "frontendDist": "../renderer/dist"
   },

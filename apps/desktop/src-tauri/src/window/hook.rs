@@ -15,7 +15,7 @@
 //!
 //! 另注：全局钩子易被杀软误报，必须配 EV 代码签名证书。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,7 +23,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetWindowRect, SetWindowPos, SetWindowsHookExW,
     UnhookWindowsHookEx, HHOOK, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WH_MOUSE_LL,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
 };
 
 use super::WindowError;
@@ -53,6 +53,29 @@ static LAST_INTERACTION_SECS: AtomicU64 = AtomicU64::new(0);
 /// 供 `ipc::spawn_frame_budget_governor` 读取。
 pub fn last_interaction_secs() -> u64 {
     LAST_INTERACTION_SECS.load(Ordering::Relaxed)
+}
+
+/// 形态切换请求。由双击宠物置位，由主进程的监管线程取走。
+///
+/// 为什么要绕一圈：钩子是全局静态的，拿不到 `PetWindow`，而形态切换必须
+/// 经过状态机（禁止业务代码直接 `SetParent`）。所以钩子只置一个标志位，
+/// 真正的切换交给持有状态机的那一侧执行。
+static TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// 取走并清除切换请求。
+pub fn take_toggle_request() -> bool {
+    TOGGLE_REQUESTED.swap(false, Ordering::Relaxed)
+}
+
+/// 供托盘等入口请求一次形态切换。钩子自己置位，真正的切换由监管线程执行。
+pub fn request_toggle() {
+    if let Ok(guard) = HOOK_STATE.lock() {
+        // 只在指针位于宠物上时才认这次双击。
+        // `transparent == false` 即"当前未穿透"，也就是指针在窗口内。
+        if guard.as_ref().is_some_and(|s| !s.transparent) {
+            TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn stamp_interaction() {
@@ -122,6 +145,9 @@ extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRES
             }
             WM_LBUTTONUP => {
                 let _ = end_drag();
+            }
+            WM_LBUTTONDBLCLK => {
+                request_toggle();
             }
             _ => {}
         }

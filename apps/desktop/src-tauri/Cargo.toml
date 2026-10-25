@@ -9,7 +9,10 @@ rust-version = "1.77"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon：托盘图标。桌宠无边框、不进任务栏、面板默认隐藏，
+# 托盘是唯一常驻的可发现入口，没有它用户关掉面板后找不到任何 UI。
+# image-ico / image-png：让 default_window_icon() 能解出图标给托盘复用。
+tauri = { version = "2", features = ["tray-icon", "image-ico", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

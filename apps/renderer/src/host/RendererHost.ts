@@ -2,7 +2,7 @@ import type { CharacterManifest, RendererCapabilities } from '@heart-star/charac
 import type { PetForm } from '@heart-star/protocol';
 import type { CharacterRenderer } from '../renderer/CharacterRenderer';
 import { createAdapter } from '../renderer/adapters';
-import { FrameScheduler, type FrameBudget } from './FrameScheduler';
+import { FrameScheduler, type FrameRate } from './FrameScheduler';
 
 /**
  * 渲染宿主
@@ -21,8 +21,18 @@ export class RendererHost {
   private form: PetForm = { kind: 'desktop' };
   private capabilities: RendererCapabilities | null = null;
 
+  /**
+   * 帧统计回调，由 IpcBridge 注入。
+   * 放在宿主上而不是调度器上，是为了让"上报"这件事留在 IPC 层，
+   * 渲染宿主自身不感知壳层。
+   */
+  onStats: ((fps: number, frameMs: number) => void) | null = null;
+
   constructor(private readonly element: HTMLElement) {
-    this.scheduler = new FrameScheduler((dt) => this.tick(dt));
+    this.scheduler = new FrameScheduler(
+      (dt) => this.tick(dt),
+      (fps, frameMs) => this.onStats?.(fps, frameMs),
+    );
   }
 
   getCapabilities(): RendererCapabilities | null {
@@ -62,7 +72,7 @@ export class RendererHost {
     void this.form;
   }
 
-  setFrameBudget(budget: FrameBudget): void {
+  setFrameBudget(budget: FrameRate): void {
     this.scheduler.setBudget(budget);
   }
 

@@ -15,7 +15,9 @@
 //!
 //! 另注：全局钩子易被杀软误报，必须配 EV 代码签名证书。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -40,6 +42,26 @@ struct HookState {
 }
 
 static HOOK_STATE: Mutex<Option<HookState>> = Mutex::new(None);
+
+/// 最近一次"指针进入宠物区域"的时间（Unix 秒）。供帧预算策略判断是否空闲。
+///
+/// 只在**进入**这一刻写一次，悬停期间的持续移动不刷新：
+/// 钩子在全局鼠标消息路径上，每帧写共享状态是没必要的开销；
+/// 而且"用户盯着宠物看"本就该被判定为空闲。
+static LAST_INTERACTION_SECS: AtomicU64 = AtomicU64::new(0);
+
+/// 供 `ipc::spawn_frame_budget_governor` 读取。
+pub fn last_interaction_secs() -> u64 {
+    LAST_INTERACTION_SECS.load(Ordering::Relaxed)
+}
+
+fn stamp_interaction() {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    LAST_INTERACTION_SECS.store(secs, Ordering::Relaxed);
+}
 
 fn to_hwnd(raw: isize) -> HWND {
     HWND(raw as *mut core::ffi::c_void)
@@ -68,6 +90,10 @@ pub fn install(hwnd: HWND) -> Result<HookHandle, WindowError> {
         origin_cursor: (0, 0),
         origin_window: (0, 0),
     });
+
+    // 起始就当作刚交互过：否则 last_interaction 为初值 0，
+    // 帧预算策略会一开机就把宠物判成空闲
+    stamp_interaction();
 
     Ok(HookHandle(hhook))
 }
@@ -127,6 +153,10 @@ fn update_click_through() -> Result<(), ()> {
     if inside == state.transparent {
         let _ = super::style::set_click_through(hwnd, !inside);
         state.transparent = !inside;
+        // 只在"指针刚刚进入"这一刻打时间戳，悬停期间的移动不刷新
+        if inside {
+            stamp_interaction();
+        }
     }
     Ok(())
 }

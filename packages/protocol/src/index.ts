@@ -26,6 +26,16 @@ export type PetForm =
 /** 输入模式：穿透（桌面，靠全局钩子）/ 直连（面板内子窗口，正常收消息） */
 export type InputMode = 'passthrough' | 'direct';
 
+/**
+ * 帧预算。'paused' 用于窗口被完全遮挡时。
+ *
+ * 刻意写成判别联合而不是 `number | 'paused'`：
+ * 后者是"原始类型 + 哨兵字符串"，映射到 Rust 时只能退化成
+ * `serde_json::Value`（类型安全全丢）或 `untagged` 枚举（单元变体会序列化成
+ * null，与 'paused' 对不上）。判别联合两侧都能生成严格类型。
+ */
+export type FrameBudget = { kind: 'fps'; value: number } | { kind: 'paused' };
+
 // ---------- 壳 → 渲染 ----------
 
 export type ShellCommand =
@@ -36,7 +46,7 @@ export type ShellCommand =
   /** 切换角色。渲染侧按 kind 懒加载对应 adapter，并完整 dispose 旧实例。 */
   | { type: 'switchCharacter'; characterId: string }
   /** 帧预算。'paused' 用于窗口被完全遮挡时。 */
-  | { type: 'setFrameBudget'; fps: number | 'paused' }
+  | { type: 'setFrameBudget'; budget: FrameBudget }
   /** 鼠标归一化坐标（-1..1），供 GazeController 使用 */
   | { type: 'setGazeTarget'; nx: number; ny: number };
 
@@ -82,6 +92,22 @@ export type AiCommand =
   | { type: 'startListening' }
   | { type: 'stopListening' }
   | { type: 'interrupt' };
+
+// ---------- 通道名 ----------
+
+/**
+ * IPC 通道名 —— Rust 与 TS 共用同一份常量。
+ *
+ * 通道名和消息结构一样属于契约：两侧各写一份字符串迟早会漂移，
+ * 而这类 bug 的表现是"消息静默丢失"，极难定位。所以放在契约包里，
+ * 由 `pnpm gen:rust` 一并生成到 Rust 侧。
+ */
+export const IPC_CHANNELS = {
+  /** 壳 → 渲染：ShellCommand */
+  shellCommand: 'heartstar://shell-command',
+  /** 渲染 → 壳：RendererEvent */
+  rendererEvent: 'heartstar://renderer-event',
+} as const;
 
 // ---------- 信封 ----------
 

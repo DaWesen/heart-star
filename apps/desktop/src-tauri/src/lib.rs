@@ -46,6 +46,10 @@ pub fn run() {
                 pet_window.renderer_scale() * 100.0
             );
 
+            // 监听渲染层事件，并接管帧预算（空闲降帧）
+            ipc::bind(&pet);
+            ipc::spawn_frame_budget_governor(pet.clone());
+
             // 交给主进程托管 —— 后续所有形态切换都经过这个状态机，
             // 业务代码不得直接操作窗口
             app.manage(pet_window);

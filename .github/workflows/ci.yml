@@ -73,6 +73,14 @@ jobs:
       - name: 构建
         run: pnpm build
 
+      # Rust 侧协议结构是生成物且已入库。重新生成后若有 diff，
+      # 说明有人改了 TS 契约却没跑生成器——这类漂移的表现是消息静默丢失，
+      # 必须在 CI 挡住。
+      - name: 校验生成的 Rust 协议无漂移
+        run: |
+          pnpm gen:rust
+          git diff --exit-code -- apps/desktop/src-tauri/src/ipc/generated.rs
+
 # 暂不纳入 CI（M1 之后按需补齐）：
 #   - tauri build：产物打包与签名依赖证书，且耗时数分钟，留到出发布流程时再做
 #   - pnpm validate:characters：assets/characters 目前只有 .gitkeep，没有可校验的角色包

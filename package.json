@@ -9,7 +9,8 @@
   "scripts": {
     "validate:characters": "pnpm --filter @heart-star/character-schema exec tsx src/cli.ts",
     "typecheck": "pnpm -r typecheck",
-    "build": "pnpm -r build"
+    "build": "pnpm -r build",
+    "gen:rust": "pnpm --filter @heart-star/protocol gen:rust"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.4",

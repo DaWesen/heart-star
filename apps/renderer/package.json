@@ -11,6 +11,7 @@
   "dependencies": {
     "@heart-star/character-schema": "workspace:*",
     "@heart-star/protocol": "workspace:*",
+    "@tauri-apps/api": "^2.12.4",
     "pixi.js": "^7.4.0"
   },
   "devDependencies": {

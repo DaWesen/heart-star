@@ -8,12 +8,15 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "gen:rust": "tsx src/gen-rust.ts"
   },
   "dependencies": {
     "@heart-star/character-schema": "workspace:*"
   },
   "devDependencies": {
+    "ts-json-schema-generator": "^2.9.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.5.4"
   }
 }

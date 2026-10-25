@@ -9,12 +9,22 @@
  * 消息分类：
  *   ShellCommand    壳  → 渲染
  *   RendererEvent   渲染 → 壳
+ *   PanelEvent      面板 → 壳（请求）
+ *   PanelCommand    壳  → 面板（下发）
  *   AiEvent         AI  → 渲染（流式，非请求响应）
+ *
+ * 为什么面板不直接对渲染发命令：渲染层只认壳这一个命令来源。
+ * 多一个来源就要多维护一份"谁有权改窗口/角色"的规则，
+ * 而壳本来就是窗口与形态的唯一权威，让它当中转是零成本的。
  *
  * 依赖方向：本包单向依赖 character-schema（语义字典是更底层的真源），
  * 反向依赖与循环依赖均禁止。
  */
-import type { RendererCapabilities, SemanticArea } from '@heart-star/character-schema';
+import type {
+  CharacterKind,
+  RendererCapabilities,
+  SemanticArea,
+} from '@heart-star/character-schema';
 
 // ---------- 形态与输入 ----------
 
@@ -54,10 +64,39 @@ export type ShellCommand =
 
 export type RendererEvent =
   | { type: 'ready'; capabilities: RendererCapabilities }
+  /** 角色切换完成。壳据此通知面板更新高亮 */
+  | { type: 'characterSwitched'; characterId: string }
   /** 命中检测结果，语义部位；null 表示未命中 */
   | { type: 'hitTest'; area: SemanticArea | null }
   | { type: 'frameStats'; fps: number; frameMs: number }
   | { type: 'error'; message: string; fatal: boolean };
+
+// ---------- 面板 ↔ 壳 ----------
+
+/** 角色摘要。面板只需要够列出按钮的字段，完整 manifest 由渲染层自己加载。 */
+export interface CharacterSummary {
+  id: string;
+  displayName: string;
+  kind: CharacterKind;
+}
+
+/** 面板 → 壳 */
+export type PanelEvent =
+  | { type: 'ready' }
+  | { type: 'switchCharacter'; characterId: string };
+
+/**
+ * 壳 → 面板
+ *
+ * 刻意做成判别联合而不是单一对象：只有一个成员时 schema 生成器会退化成
+ * 结构体，`type` 变成普通字符串，字面量约束丢了；日后加成员时形状还会突变。
+ */
+export type PanelCommand =
+  | { type: 'characterList'; characters: CharacterSummary[] }
+  /** 切换成功，面板据此更新"当前角色"高亮 */
+  | { type: 'characterSwitched'; characterId: string }
+  /** 切换失败（如 adapter 未实现、manifest 解析失败）。面板要能把原因显示出来 */
+  | { type: 'characterFailed'; message: string };
 
 // ---------- AI → 渲染（流式）----------
 
@@ -107,6 +146,10 @@ export const IPC_CHANNELS = {
   shellCommand: 'heartstar://shell-command',
   /** 渲染 → 壳：RendererEvent */
   rendererEvent: 'heartstar://renderer-event',
+  /** 壳 → 面板：PanelCommand */
+  panelCommand: 'heartstar://panel-command',
+  /** 面板 → 壳：PanelEvent */
+  panelEvent: 'heartstar://panel-event',
 } as const;
 
 // ---------- 信封 ----------

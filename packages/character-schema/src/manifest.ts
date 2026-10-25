@@ -11,8 +11,15 @@ import { SEMANTIC_BONES } from './semantics.js';
  * semantics 声明语义映射，rig 声明骨骼与约束，capabilities 声明后端能力。
  */
 
-export const CharacterKindSchema = z.enum(['live2d', 'spine', 'sprite', 'vrm']);
-export type CharacterKind = z.infer<typeof CharacterKindSchema>;
+export const CHARACTER_KINDS = ['live2d', 'spine', 'sprite', 'vrm'] as const;
+export const CharacterKindSchema = z.enum(CHARACTER_KINDS);
+/**
+ * 刻意写成 `(typeof CHARACTER_KINDS)[number]` 而不是 `z.infer<typeof CharacterKindSchema>`：
+ * 后者是调用表达式，protocol 的 schema 生成器（`ts-json-schema-generator`）解析不了，
+ * 一旦 protocol 引用 CharacterKind 就会生成失败。
+ * 与 semantics.ts 里 SemanticArea 的写法保持一致。
+ */
+export type CharacterKind = (typeof CHARACTER_KINDS)[number];
 
 const Vec3Schema = z.tuple([z.number(), z.number(), z.number()]);
 
@@ -71,20 +78,33 @@ export const CapabilitiesSchema = z.object({
 });
 
 /**
+ * 一个语义映射到的目标参数。
+ *
+ * 允许**多个**是必需的，不是可选的便利：Live2D 里一个语义天然对应多个参数 ——
+ * 眨眼要同时写 `ParamEyeLOpen` 与 `ParamEyeROpen`，情绪要同时动眉毛与嘴形。
+ * 只接受单个字符串的话，美术只能二选一，做出来就是"只眨一只眼"。
+ */
+export const ParamTargetSchema = z.union([
+  z.string().min(1),
+  z.array(z.string().min(1)).min(1),
+]);
+export type ParamTarget = z.infer<typeof ParamTargetSchema>;
+
+/**
  * 语义映射表。
  * .strict() 拒绝未知键 —— 美术把 ParamAngelX 拼错成 ParamAngleX 时立刻报错，
  * 而不是运行时静默失效。
  */
 export const SemanticsSchema = z
   .object({
-    lookX: z.string().optional(),
-    lookY: z.string().optional(),
-    breath: z.string().optional(),
-    blink: z.string().optional(),
-    lipSync: z.string().optional(),
-    joy: z.string().optional(),
-    anger: z.string().optional(),
-    sadness: z.string().optional(),
+    lookX: ParamTargetSchema.optional(),
+    lookY: ParamTargetSchema.optional(),
+    breath: ParamTargetSchema.optional(),
+    blink: ParamTargetSchema.optional(),
+    lipSync: ParamTargetSchema.optional(),
+    joy: ParamTargetSchema.optional(),
+    anger: ParamTargetSchema.optional(),
+    sadness: ParamTargetSchema.optional(),
   })
   .strict();
 
@@ -95,8 +115,10 @@ export const CharacterManifestSchema = z.object({
   version: z.number().int().positive().default(1),
   displayName: z.string().optional(),
 
-  /** 资产入口：2D 为 model3.json，3D 为 .vrm / .glb */
-  entry: z.string().min(1),
+  /** 资产入口：2D 为 model3.json，3D 为 .vrm / .glb。
+   *  程序化角色（如 M1 的占位方块）没有资产文件，可省略；
+   *  资产型 adapter 拿不到它会在加载时报错，所以契约层不强行要求。 */
+  entry: z.string().min(1).optional(),
 
   /** 归一化锚点（0..1），决定角色对齐屏幕/面板的位置 */
   anchor: z.object({ x: z.number(), y: z.number() }).default({ x: 0.5, y: 1 }),

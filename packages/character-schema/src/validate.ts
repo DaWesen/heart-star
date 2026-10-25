@@ -44,27 +44,32 @@ export function validateManifest(input: unknown): ValidationResult {
 
   const m = parsed.data;
 
-  // —— 核心语义必填（error）——
-  for (const p of REQUIRED_PARAMS) {
-    if (!m.semantics[p]) {
-      issues.push({
-        level: 'error',
-        code: 'SEMANTIC_REQUIRED_MISSING',
-        path: `semantics.${p}`,
-        message: `核心语义参数 ${p} 缺失。眼动与口型是桌宠"活着"的底线，不做降级。`,
-      });
+  // —— 语义参数检查（仅资产型角色）——
+  // semantics 映射的是模型里的参数名；程序化角色（entry 省略，如 M1 占位方块）
+  // 根本没有参数可映射，对它要求 lookX/lookY 等于要求它声明不存在的东西。
+  if (m.entry) {
+    // 核心语义必填（error）
+    for (const p of REQUIRED_PARAMS) {
+      if (!m.semantics[p]) {
+        issues.push({
+          level: 'error',
+          code: 'SEMANTIC_REQUIRED_MISSING',
+          path: `semantics.${p}`,
+          message: `核心语义参数 ${p} 缺失。眼动与口型是桌宠"活着"的底线，不做降级。`,
+        });
+      }
     }
-  }
 
-  // —— 可选语义缺失（warning），由 SemanticFallback 静默降级 ——
-  for (const p of OPTIONAL_PARAMS as readonly SemanticParam[]) {
-    if (!m.semantics[p]) {
-      issues.push({
-        level: 'warning',
-        code: 'SEMANTIC_OPTIONAL_MISSING',
-        path: `semantics.${p}`,
-        message: `可选语义参数 ${p} 未声明，相关表现将被降级。`,
-      });
+    // 可选语义缺失（warning），由 SemanticFallback 静默降级
+    for (const p of OPTIONAL_PARAMS as readonly SemanticParam[]) {
+      if (!m.semantics[p]) {
+        issues.push({
+          level: 'warning',
+          code: 'SEMANTIC_OPTIONAL_MISSING',
+          path: `semantics.${p}`,
+          message: `可选语义参数 ${p} 未声明，相关表现将被降级。`,
+        });
+      }
     }
   }
 
@@ -164,8 +169,9 @@ export async function validateCharacterDir(dir: string): Promise<ValidationResul
 
   const result = validateManifest(json);
 
-  // 入口文件存在性 —— 只在 manifest 结构正确后才检查
-  if (result.manifest) {
+  // 入口文件存在性 —— 只在 manifest 结构正确后才检查。
+  // 程序化角色（如 M1 占位方块）没有资产入口，entry 可省略，跳过这项检查。
+  if (result.manifest?.entry) {
     const entryPath = path.join(dir, result.manifest.entry);
     try {
       await access(entryPath);

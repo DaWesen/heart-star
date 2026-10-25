@@ -37,7 +37,7 @@ interface Schema {
 }
 
 /** 需要生成到 Rust 的契约根类型。其余定义会被它们间接引入，一并生成。 */
-const ROOTS = ['ShellCommand', 'RendererEvent'] as const;
+const ROOTS = ['ShellCommand', 'RendererEvent', 'PanelCommand', 'PanelEvent'] as const;
 
 // 本文件位于 packages/protocol/src/，故上溯三级到仓库根
 const OUT_PATH = fileURLToPath(
@@ -126,10 +126,16 @@ function docComment(description: string | undefined, indent: string): string {
   if (!description) return '';
   // JSDoc 段落可能是多行的。Rust 的 `///` 必须**每行都有前缀**，
   // 漏了续行前缀就不是注释而是代码，直接编译失败。
+  //
+  // 空行只写 `///`，不能写成 `/// `：尾随空格会被 rustfmt 去掉，
+  // 于是"生成 → 格式化 → 再生成"永远对不上，CI 的漂移校验会恒定失败。
   return (
     description
       .split('\n')
-      .map((line) => `${indent}/// ${line.trim()}`)
+      .map((line) => {
+        const text = line.trim();
+        return text ? `${indent}/// ${text}` : `${indent}///`;
+      })
       .join('\n') + '\n'
   );
 }
@@ -257,6 +263,8 @@ use serde::{Deserialize, Serialize};
 /// IPC 通道名 —— 与 TS 侧同源，禁止在 Rust 里另写一份字符串
 pub const CHANNEL_SHELL_COMMAND: &str = "${IPC_CHANNELS.shellCommand}";
 pub const CHANNEL_RENDERER_EVENT: &str = "${IPC_CHANNELS.rendererEvent}";
+pub const CHANNEL_PANEL_COMMAND: &str = "${IPC_CHANNELS.panelCommand}";
+pub const CHANNEL_PANEL_EVENT: &str = "${IPC_CHANNELS.panelEvent}";
 `;
 
 for (const name of typeNames) {

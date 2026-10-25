@@ -15,6 +15,32 @@ use serde::{Deserialize, Serialize};
 /// IPC 通道名 —— 与 TS 侧同源，禁止在 Rust 里另写一份字符串
 pub const CHANNEL_SHELL_COMMAND: &str = "heartstar://shell-command";
 pub const CHANNEL_RENDERER_EVENT: &str = "heartstar://renderer-event";
+pub const CHANNEL_PANEL_COMMAND: &str = "heartstar://panel-command";
+pub const CHANNEL_PANEL_EVENT: &str = "heartstar://panel-event";
+
+/// 刻意写成 `(typeof CHARACTER_KINDS)[number]` 而不是 `z.infer<typeof CharacterKindSchema>`： 后者是调用表达式，protocol 的 schema 生成器（`ts-json-schema-generator`）解析不了， 一旦 protocol 引用 CharacterKind 就会生成失败。 与 semantics.ts 里 SemanticArea 的写法保持一致。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CharacterKind {
+    #[serde(rename = "live2d")]
+    Live2d,
+    #[serde(rename = "spine")]
+    Spine,
+    #[serde(rename = "sprite")]
+    Sprite,
+    #[serde(rename = "vrm")]
+    Vrm,
+}
+
+/// 角色摘要。面板只需要够列出按钮的字段，完整 manifest 由渲染层自己加载。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharacterSummary {
+    #[serde(rename = "id")]
+    pub id: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    #[serde(rename = "kind")]
+    pub kind: CharacterKind,
+}
 
 /// 帧预算。'paused' 用于窗口被完全遮挡时。
 ///
@@ -38,6 +64,42 @@ pub enum InputMode {
     Passthrough,
     #[serde(rename = "direct")]
     Direct,
+}
+
+/// 壳 → 面板
+///
+/// 刻意做成判别联合而不是单一对象：只有一个成员时 schema 生成器会退化成 结构体，`type` 变成普通字符串，字面量约束丢了；日后加成员时形状还会突变。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PanelCommand {
+    #[serde(rename = "characterList")]
+    CharacterList {
+        #[serde(rename = "characters")]
+        characters: Vec<CharacterSummary>,
+    },
+    #[serde(rename = "characterSwitched")]
+    CharacterSwitched {
+        #[serde(rename = "characterId")]
+        character_id: String,
+    },
+    #[serde(rename = "characterFailed")]
+    CharacterFailed {
+        #[serde(rename = "message")]
+        message: String,
+    },
+}
+
+/// 面板 → 壳
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PanelEvent {
+    #[serde(rename = "ready")]
+    Ready,
+    #[serde(rename = "switchCharacter")]
+    SwitchCharacter {
+        #[serde(rename = "characterId")]
+        character_id: String,
+    },
 }
 
 /// 宠物窗口形态。与 Rust 侧 PetForm 保持一一对应。
@@ -77,6 +139,11 @@ pub enum RendererEvent {
     Ready {
         #[serde(rename = "capabilities")]
         capabilities: RendererCapabilities,
+    },
+    #[serde(rename = "characterSwitched")]
+    CharacterSwitched {
+        #[serde(rename = "characterId")]
+        character_id: String,
     },
     #[serde(rename = "hitTest")]
     HitTest {

@@ -1,8 +1,24 @@
 import type { CharacterManifest, RendererCapabilities } from '@heart-star/character-schema';
 import type { PetForm } from '@heart-star/protocol';
+import { loadManifest } from '../character/manifest';
 import type { CharacterRenderer } from '../renderer/CharacterRenderer';
 import { createAdapter } from '../renderer/adapters';
 import { FrameScheduler, type FrameRate } from './FrameScheduler';
+
+/**
+ * 占位角色的着色：由角色 id 派生一个色相。
+ *
+ * 只是 M1 的临时手段 —— 现在所有 sprite 角色共用一个占位方块，
+ * 不给它上色的话"换了个角色"在画面上完全没有区别，切换链路好不好使没法验证。
+ * 等真实 adapter 落地（M2）颜色就来自角色自己的贴图，这个函数可以直接删掉。
+ */
+function tintFor(characterId: string): string {
+  let hash = 0;
+  for (let i = 0; i < characterId.length; i += 1) {
+    hash = (hash * 31 + characterId.charCodeAt(i)) % 360;
+  }
+  return `hsl(${hash} 70% 72%)`;
+}
 
 /**
  * 渲染宿主
@@ -18,7 +34,6 @@ import { FrameScheduler, type FrameRate } from './FrameScheduler';
 export class RendererHost {
   private readonly scheduler: FrameScheduler;
   private renderer: CharacterRenderer | null = null;
-  private form: PetForm = { kind: 'desktop' };
   private capabilities: RendererCapabilities | null = null;
 
   /**
@@ -41,35 +56,47 @@ export class RendererHost {
 
   /** 加载角色。会完整 dispose 旧实例 —— 同一时刻只允许一个 adapter 存活。 */
   async loadCharacter(manifest: CharacterManifest): Promise<void> {
-    this.renderer?.dispose();
-    this.renderer = null;
-
     // 动态 import 是刻意的：Vite 会把它切成独立 chunk，
     // 只装 2D 角色的用户永远不下载 three.js
-    const adapter = await createAdapter(manifest.kind, this.element);
-    await adapter.load(manifest);
+    //
+    // 顺序也刻意是"先建新的、成功了再丢旧的"：反过来（先 dispose 再加载）的话，
+    // 一旦新 adapter 抛错（如 Live2D adapter 尚未实现），画面上就什么都不剩了 ——
+    // 用户看到的是角色凭空消失，而不是一条能看明白的错误。
+    const next = await createAdapter(manifest.kind, this.element);
+    await next.load(manifest);
 
-    this.renderer = adapter;
-    this.capabilities = adapter.capabilities;
+    this.renderer?.dispose();
+    this.renderer = next;
+    this.capabilities = next.capabilities;
+  }
+
+  /** 按 id 切换角色：加载 manifest → 建 adapter → 换掉旧的。 */
+  async switchCharacter(characterId: string): Promise<void> {
+    const manifest = await loadManifest(characterId);
+    await this.loadCharacter(manifest);
+
+    this.element.style.setProperty('--character-tint', tintFor(characterId));
+    this.scheduler.start();
   }
 
   /** M1 占位角色：会动的方块，用于验证窗口层而不引入渲染库干扰变量 */
   async usePlaceholder(): Promise<void> {
-    this.renderer?.dispose();
-    this.renderer = null;
-
     const { PlaceholderAdapter } = await import('../renderer/adapters/PlaceholderAdapter');
-    const adapter = new PlaceholderAdapter(this.element);
-    this.renderer = adapter;
-    this.capabilities = adapter.capabilities;
+    const next = new PlaceholderAdapter(this.element);
+
+    this.renderer?.dispose();
+    this.renderer = next;
+    this.capabilities = next.capabilities;
     this.scheduler.start();
   }
 
+  /**
+   * 形态只写进 dataset，不存字段：当前渲染层除了 CSS 之外不需要读它，
+   * 存一份同步两份状态的字段只会带来"改了一个忘了另一个"的风险。
+   */
   setForm(form: PetForm): void {
-    this.form = form;
     // 两个形态下 root 都保持透明，差异交由壳层的窗口层级（Z 序）处理
     this.element.dataset.form = form.kind;
-    void this.form;
   }
 
   setFrameBudget(budget: FrameRate): void {

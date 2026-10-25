@@ -25,9 +25,9 @@ if ('__TAURI_INTERNALS__' in window) {
   );
 }
 
-// TODO(M1)：从壳层接收 switchCharacter 命令后加载真实角色包。
-// M1 阶段先用占位角色验证窗口层（透明、穿透、形态切换、DPI），
+// M1 阶段先用占位角色验证窗口层（透明、穿透、形态切换、DPI）。
 // 刻意不接 Live2D —— 排除渲染库的干扰变量，问题定位更快。
+// 真实角色由壳层的 switchCharacter 命令触发加载（面板按钮 → 壳 → 这里）。
 await host.usePlaceholder();
 
 // 必须等角色加载完再 start：`ready` 事件要带上渲染能力，

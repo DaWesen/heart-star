@@ -24,6 +24,9 @@ export class TauriTransport implements Transport {
   ) {}
 
   onCommand(handler: (cmd: ShellCommand) => void): void {
+    // 刻意不保存 listen 返回的取消句柄：渲染进程的生命周期与页面完全一致，
+    // 页面销毁时 Tauri 会连同监听器一起回收。留一个谁也不会去调的 unlisten，
+    // 只是把"这里可能有泄漏"的错觉写进代码里。
     void listen<ShellCommand>(this.commandChannel, (event) => handler(event.payload)).catch(
       (e) => console.error('[heart-star] 监听壳层命令失败', e),
     );
@@ -84,11 +87,31 @@ export class IpcBridge {
         // TODO(M2): 交给 GazeController 平滑后写入 adapter.lookAt
         break;
       case 'switchCharacter':
-        // TODO(M2): 按 id 读取角色包并 loadCharacter
+        this.switchCharacter(cmd.characterId);
         break;
       case 'setInputMode':
         // 输入模式由壳层通过窗口样式实现，渲染层无需动作
         break;
+    }
+  }
+
+  /**
+   * 切换角色。
+   *
+   * 失败必须上报而不是静默：面板上的按钮点下去没有反馈，
+   * 用户无从判断是"切换中"还是"压根没生效"。
+   * 壳层会把这条错误转发给面板显示（见 ipc/panel.rs）。
+   */
+  private async switchCharacter(characterId: string): Promise<void> {
+    try {
+      await this.host.switchCharacter(characterId);
+      this.emit({ type: 'characterSwitched', characterId });
+    } catch (e) {
+      this.emit({
+        type: 'error',
+        message: e instanceof Error ? e.message : String(e),
+        fatal: false,
+      });
     }
   }
 

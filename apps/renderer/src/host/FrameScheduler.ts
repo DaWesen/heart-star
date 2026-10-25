@@ -65,6 +65,9 @@ export class FrameScheduler {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    // 必须一并清掉累积器：暂停期间的时间不该算进下一次出帧。
+    // 不清的话，暂停 10 秒再恢复会立刻连补好几帧，动作明显跳一下。
+    this.accumulator = 0;
   }
 
   private loop = (now: number): void => {

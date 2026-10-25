@@ -101,6 +101,13 @@ impl PetWindow {
         self.form
     }
 
+    /// 窗口当前所在显示器的缩放系数（1.0 = 100%）。
+    ///
+    /// 每次现算而不缓存：跨屏后缓存值就是脏的，而查询成本只是一次 `GetDpiForWindow`。
+    pub fn renderer_scale(&self) -> f64 {
+        dpi::scale_for(self.hwnd)
+    }
+
     /// 接管窗口：应用桌面形态样式并装上鼠标钩子。
     /// 与 `to_desktop` 的区别——不做宿主迁移，因为窗口本来就没有宿主。
     pub fn init(&mut self) -> Result<(), WindowError> {

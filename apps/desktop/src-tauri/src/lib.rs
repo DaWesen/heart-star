@@ -10,6 +10,12 @@ pub mod window;
 use tauri::Manager;
 
 pub fn run() {
+    // DPI 感知必须在创建任何窗口之前设定，否则系统会对整个窗口做位图拉伸：
+    // 内容模糊，且命中判定与窗口矩形错位。
+    if !window::dpi::enable_per_monitor_v2() {
+        eprintln!("[heart-star] 警告：未启用 Per-Monitor V2 DPI 感知，混合缩放屏下窗口会模糊");
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             // 宠物窗口在 tauri.conf.json 中定义（label = "pet"）。
@@ -35,6 +41,10 @@ pub fn run() {
             } else {
                 eprintln!("[heart-star] 警告：鼠标钩子未安装，宠物将始终穿透（不可交互）");
             }
+            eprintln!(
+                "[heart-star] DPI 缩放 {:.0}%",
+                pet_window.renderer_scale() * 100.0
+            );
 
             // 交给主进程托管 —— 后续所有形态切换都经过这个状态机，
             // 业务代码不得直接操作窗口

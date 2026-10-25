@@ -16,6 +16,7 @@
 pub mod dpi;
 pub mod hook;
 pub mod host;
+pub mod proc;
 pub mod style;
 
 use std::fmt;
@@ -40,6 +41,8 @@ pub enum WindowError {
     StyleFailed,
     /// SetParent 失败
     ParentFailed,
+    /// 全局鼠标钩子安装失败
+    HookFailed,
     /// 正在切换中，拒绝并发请求
     Busy,
 }
@@ -50,6 +53,7 @@ impl fmt::Display for WindowError {
             Self::InvalidHost => "宿主窗口无效",
             Self::StyleFailed => "窗口样式修改失败",
             Self::ParentFailed => "宿主迁移失败",
+            Self::HookFailed => "全局鼠标钩子安装失败",
             Self::Busy => "上一次切换尚未完成",
         };
         f.write_str(s)
@@ -77,6 +81,12 @@ pub struct PetWindow {
     hook: Option<hook::HookHandle>,
 }
 
+// SAFETY: HWND 是 Win32 窗口句柄，可跨线程持有；Win32 窗口 API 本身线程安全。
+// 本项目实际只在主线程操作窗口，跨线程仅传递句柄本身。
+// 需要这两个 impl 是因为 Tauri 的 State（app.manage）要求 T: Send + Sync + 'static。
+unsafe impl Send for PetWindow {}
+unsafe impl Sync for PetWindow {}
+
 impl PetWindow {
     pub fn new(hwnd: HWND) -> Self {
         Self {
@@ -89,6 +99,30 @@ impl PetWindow {
 
     pub fn form(&self) -> Form {
         self.form
+    }
+
+    /// 接管窗口：应用桌面形态样式并装上鼠标钩子。
+    /// 与 `to_desktop` 的区别——不做宿主迁移，因为窗口本来就没有宿主。
+    pub fn init(&mut self) -> Result<(), WindowError> {
+        style::apply_desktop_style(self.hwnd)?;
+        // 子类化窗口过程：抓住停用瞬间并在原地重绘。
+        // 失败同样不致命，只是退化成"横条会闪一下"。
+        if proc::install(self.hwnd) {
+            eprintln!("[heart-star] 窗口过程已接管");
+        } else {
+            eprintln!("[heart-star] 警告：窗口过程接管失败");
+        }
+        // 钩子失败不致命：退化为"始终穿透"，宠物仍可见只是不可交互。
+        // 若在此返回 Err，一个钩子问题就会让宠物彻底不显示，代价不成比例。
+        self.hook = hook::install(self.hwnd).ok();
+        self.form = Form::Desktop;
+        Ok(())
+    }
+
+    /// 钩子是否安装成功 —— 供主进程诊断输出。
+    /// 钩子失败不应阻止宠物显示，但必须能被看见，否则会变成"宠物在但点不动"的疑难问题。
+    pub fn hook_installed(&self) -> bool {
+        self.hook.is_some()
     }
 
     /// 切换到面板形态。
@@ -162,7 +196,14 @@ impl PetWindow {
         host::hide(self.hwnd);
         host::detach(self.hwnd)?;
         style::apply_desktop_style(self.hwnd)?;
-        host::place(self.hwnd, host::Rect { x, y, ..Default::default() })?;
+        host::place(
+            self.hwnd,
+            host::Rect {
+                x,
+                y,
+                ..Default::default()
+            },
+        )?;
         host::show(self.hwnd);
 
         // 桌面形态下窗口被穿透，收不到鼠标消息，必须靠全局钩子
@@ -174,10 +215,10 @@ impl PetWindow {
 
     /// 强制回落。不因任何中间步骤失败而中断，尽力把宠物救回桌面。
     fn force_desktop(&mut self) -> Result<(), WindowError> {
-        let _ = host::hide(self.hwnd);
+        host::hide(self.hwnd);
         let _ = host::detach(self.hwnd);
         let _ = style::apply_desktop_style(self.hwnd);
-        let _ = host::show(self.hwnd);
+        host::show(self.hwnd);
         if self.hook.is_none() {
             self.hook = hook::install(self.hwnd).ok();
         }

@@ -4,12 +4,26 @@
   "version": "0.1.0",
   "identifier": "com.heartstar.desktop",
   "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
-    "frontendDist": ""
+    "beforeDevCommand": "pnpm --filter @heart-star/renderer dev",
+    "beforeBuildCommand": "pnpm --filter @heart-star/renderer build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../renderer/dist"
   },
   "app": {
-    "windows": [],
+    "windows": [
+      {
+        "label": "pet",
+        "title": "",
+        "width": 320,
+        "height": 420,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false
+      }
+    ],
     "security": {
       "csp": null
     }

@@ -13,6 +13,7 @@
 | 4 | 面板三层结构 | 宠物如何被家具遮挡 | 三层 Z 序是否成立 |
 | 5 | 渲染抽象与能力协商 | 2D/3D 如何共存 | 上层是否只依赖语义 |
 | 6 | 动画四层管线 | AI 如何驱动到骨骼 | 层的顺序是否正确 |
+| 7 | 文件级依赖清单 | 谁 import 谁，哪些已接通 | 断点与孤儿模块 |
 
 ---
 
@@ -220,6 +221,95 @@ graph TB
 
 ---
 
+## 7. 文件级依赖与接线状态
+
+前六张图讲分层与职责，本节讲**实际的 import 关系**：谁引用谁，以及哪些边界目前没有真正接通。
+这一节最容易随时间失真，M1 开工后每接通一处就应回来更新。
+
+### 契约层：自下而上的单链
+
+```
+semantics.ts            零依赖 —— 语义字典，整个项目的地基
+    ↑
+manifest.ts             import { SEMANTIC_BONES }；zod schema 唯一真源
+    ↑
+validate.ts             import { CharacterManifestSchema, SEMANTIC_BONE_SET }
+                        import { REQUIRED_PARAMS, OPTIONAL_PARAMS }
+    ↑
+cli.ts                  import { validateCharacterDir }
+    ↑
+index.ts                桶文件，对外只暴露上述三个
+```
+
+严格单向、无回边。改 `semantics.ts` 会波及全部，所以它必须最先冻结。
+
+`protocol/src/index.ts` 是契约层内部唯一的横向引用：`import type { RendererCapabilities, SemanticArea }`。语义字典比消息格式更底层，反向依赖禁止。
+
+### 渲染进程
+
+```
+main.ts
+  ├→ host/RendererHost.ts
+  │    ├→ host/FrameScheduler.ts
+  │    ├→ renderer/adapters/index.ts ──动态 import──→ adapters/PlaceholderAdapter.ts
+  │    └→ renderer/CharacterRenderer.ts（仅类型，无运行时依赖）
+  └→ bridge/ipc.ts ──→ RendererHost（仅类型）
+```
+
+`usePlaceholder()` 是**唯一端到端可运行的链路**：`vite dev` 后可见粉色方块呼吸，
+`setParameter('lipSync')` 与 `lookAt()` 会真实改变形变与眼睛位置。
+
+`package.json` 虽声明了 `pixi.js`，但**没有任何文件 import 它**——占位角色刻意用纯 DOM 实现，
+避免 M1 验证窗口层时引入渲染库的干扰变量。
+
+### 壳层（Rust）
+
+```
+main.rs → lib.rs (heart_star::run)
+            ├→ window/mod.rs   ← PetWindow 状态机，核心
+            │    ├→ window/style.rs   样式位
+            │    ├→ window/host.rs    SetParent 迁移
+            │    ├→ window/hook.rs    鼠标钩子
+            │    └→ window/dpi.rs     DPI 重算
+            ├→ ipc/mod.rs       （空壳）
+            └→ lifecycle/mod.rs （空壳）
+```
+
+四个子模块**互不引用**，靠 `mod.rs` 编排顺序。
+`lib.rs` 的 `setup()` 目前是 `TODO(M1)` —— 状态机尚未被任何代码实例化。
+
+### 断点清单
+
+| 边界 | 状态 | 计划接通时机 |
+|---|---|---|
+| Rust `ipc/mod.rs` ↔ TS `bridge/ipc.ts` | ✗ 仅 TODO 注释，无实际通道 | M1 |
+| `protocol` 的 TS 类型 → Rust serde 结构 | ✗ 尚未生成，两侧各写各的 | M1 |
+| `ai-core` ↔ `AiEvent` / `SemanticTag` | ✗ 协议已定义，无生产者也无消费者 | M4 |
+| `IpcBridge` 的 `switchCharacter` / `setGazeTarget` | ✗ 分支存在但为空实现 | M2 |
+
+横向看依赖单向无环；纵向看，**跨语言那一刀还没切开**——
+TS 侧与 Rust 侧目前是两个各自能编译、但互不相通的世界。
+
+### 孤儿模块
+
+`behavior/EmotionStateMachine.ts` 与 `behavior/SemanticFallback.ts` **没有任何文件 import**。
+
+原因：`main.ts` 只接了 `RendererHost` 与 `IpcBridge`，行为层要等 M2 有真实 adapter 后
+才有接入点——那时才存在"情绪值该写进哪个参数"的问题。属待接线，不是疏漏；
+**但若 M2 结束时仍是孤儿，那就是真问题**。
+
+### 依赖形状一句话
+
+```
+契约层（character-schema → protocol）
+   ↑                          ↑
+renderer ─────────────────────┘
+   ↑（IPC，未接通）
+desktop（Rust 壳）
+```
+
+---
+
 ## review 检查清单
 
 按图顺序逐项确认：
@@ -230,3 +320,5 @@ graph TB
 - [ ] 图 4：三层 Z 序是否满足"宠物可被遮挡"的需求
 - [ ] 图 5：上层代码里是否出现 `kind === '...'` 判断（应为 capabilities 查询）
 - [ ] 图 6：④ physics 是否在最后；程序化旋转是否相对 rest pose
+- [ ] 第 7 节：断点清单是否仍准确——每接通一处应同步更新，失真即失去意义
+- [ ] 第 7 节：`behavior/` 两个模块是否仍为孤儿——M2 结束时必须已接线

@@ -11,6 +11,8 @@
         padding: 0;
         width: 100%;
         height: 100%;
+        /* 页面必须透明。但注意：仅靠 CSS 不够——透出来的是 WebView2 控件自身的
+           背景，那一层由 Tauri 的 transparent 配置控制（见 tauri.conf.json）。 */
         background: transparent;
         overflow: hidden;
         /* 桌宠窗口不需要文本选择 */
@@ -22,7 +24,9 @@
       }
     </style>
   </head>
-  <body>
+  <!-- data-tauri-drag-region：Tauri 识别该属性后允许拖动无边框窗口。
+       穿透状态下鼠标消息不进窗口，所以只有钩子取消穿透后（指针悬停）才可拖动。 -->
+  <body data-tauri-drag-region>
     <div id="stage"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

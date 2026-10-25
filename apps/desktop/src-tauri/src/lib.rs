@@ -12,13 +12,34 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // 骨架阶段：窗口创建入口。
-            // M1 实现顺序：
-            //   1. 创建宠物窗口（transparent + frameless，URL 指向 renderer 开发/构建产物）
-            //   2. window::PetWindow 接管其 HWND，应用桌面形态样式并挂钩子
-            //   3. 面板窗口按需创建，创建后把宠物窗口 SetParent 进去
-            let _handle = app.handle();
-            // TODO(M1): 创建宠物窗口并接管
+            // 宠物窗口在 tauri.conf.json 中定义（label = "pet"）。
+            //
+            // 为什么不用 WebviewWindowBuilder 动态创建：
+            // 实测 Builder 的 .transparent(true) 没有作用到 WebView2 控件层——
+            // 窗口本身透明了，但页面透明后透出的是 WebView2 默认的白色背景，
+            // 表现为窗口顶部一大片白。写在配置里由 Tauri 在窗口创建源头应用，
+            // 才能连 WebView2 背景一起透明。
+            let pet = app
+                .get_webview_window("pet")
+                .expect("tauri.conf.json 中应配置 label=pet 的窗口");
+
+            // 接管 HWND：应用桌面形态样式（穿透 / 不进任务栏 / 不抢焦点）、
+            // 子类化窗口过程（拦截 WM_NCACTIVATE 等非客户区绘制）并挂钩子
+            let hwnd = pet.hwnd()?;
+            let mut pet_window = window::PetWindow::new(hwnd);
+            if let Err(e) = pet_window.init() {
+                eprintln!("[heart-star] 窗口样式应用失败: {e}");
+            }
+            if pet_window.hook_installed() {
+                eprintln!("[heart-star] 鼠标钩子已安装");
+            } else {
+                eprintln!("[heart-star] 警告：鼠标钩子未安装，宠物将始终穿透（不可交互）");
+            }
+
+            // 交给主进程托管 —— 后续所有形态切换都经过这个状态机，
+            // 业务代码不得直接操作窗口
+            app.manage(pet_window);
+
             Ok(())
         })
         .run(tauri::generate_context!())

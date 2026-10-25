@@ -14,9 +14,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Win32：透明窗口、鼠标穿透、宿主迁移、DPI 全靠它。
-# features 按需增删，不要开 features = ["Win32_Foundation", ...] 全量，编译极慢。
+# 版本必须与 tauri 内部依赖的 windows 对齐（当前 0.62），
+# 否则 `WebviewWindow::hwnd()` 返回的 HWND 与本 crate 的 HWND 是两个不同类型。
+# features 按需增删，不要开全量，编译极慢。
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
   "Win32_Graphics_Dwm",

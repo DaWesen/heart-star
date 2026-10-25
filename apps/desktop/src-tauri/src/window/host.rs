@@ -3,8 +3,12 @@
 //! 单次形态切换的固定序列（顺序不可调换）：
 //!   hide → 改样式 → SetParent → SetWindowPos → show
 //! 先隐藏再显示，规避绝大部分闪烁与重绘撕裂。
+//!
+//! 注意 windows 0.62 的约定：`SetParent` 第二参数是 `Option<HWND>`，
+//! 挂载传 `Some(host)`，脱离传 `None`。返回值为原父窗口句柄（可能为 NULL）。
+//! （0.58 时代是泛型 `Param<HWND>` 且不接受 Option —— 升级时需重新核对签名。）
 
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     SetParent, SetWindowPos, ShowWindow, SWP_FRAMECHANGED, SWP_NOZORDER, SW_HIDE, SW_SHOWNA,
 };
@@ -17,17 +21,6 @@ pub struct Rect {
     pub y: i32,
     pub width: i32,
     pub height: i32,
-}
-
-impl Rect {
-    fn to_win32(&self) -> RECT {
-        RECT {
-            left: self.x,
-            top: self.y,
-            right: self.x + self.width,
-            bottom: self.y + self.height,
-        }
-    }
 }
 
 pub fn hide(hwnd: HWND) {
@@ -46,28 +39,23 @@ pub fn show(hwnd: HWND) {
 /// 挂载到宿主窗口（面板形态）
 pub fn attach_to(hwnd: HWND, host: HWND) -> Result<(), WindowError> {
     unsafe {
-        if SetParent(hwnd, Some(host)).is_invalid() {
-            return Err(WindowError::ParentFailed);
-        }
+        SetParent(hwnd, Some(host)).map_err(|_| WindowError::ParentFailed)?;
     }
     Ok(())
 }
 
-/// 脱离宿主（桌面形态）
+/// 脱离宿主（桌面形态）。传 None 即表示无父窗口。
 pub fn detach(hwnd: HWND) -> Result<(), WindowError> {
     unsafe {
-        if SetParent(hwnd, None).is_invalid() {
-            return Err(WindowError::ParentFailed);
-        }
+        SetParent(hwnd, None).map_err(|_| WindowError::ParentFailed)?;
     }
     Ok(())
 }
 
 pub fn place(hwnd: HWND, area: Rect) -> Result<(), WindowError> {
-    let _rect: RECT = area.to_win32();
     unsafe {
         // M1 实现：子窗口坐标需经 MapWindowPoints 换算到宿主客户区坐标系
-        let _ = SetWindowPos(
+        SetWindowPos(
             hwnd,
             None,
             area.x,
@@ -75,7 +63,8 @@ pub fn place(hwnd: HWND, area: Rect) -> Result<(), WindowError> {
             area.width,
             area.height,
             SWP_FRAMECHANGED | SWP_NOZORDER,
-        );
+        )
+        .map_err(|_| WindowError::StyleFailed)?;
     }
     Ok(())
 }

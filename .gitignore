@@ -17,6 +17,9 @@ apps/*/build/
 apps/desktop/src-tauri/gen/
 apps/desktop/src-tauri/target/
 
+# 库 crate 的 lock 不入库（只有最终产物 apps/desktop/src-tauri 的 Cargo.lock 需要锁定）
+packages/ai-core/Cargo.lock
+
 # ---------- 角色资产 ----------
 # 体积大、含第三方授权素材，走独立资产仓库或 CDN 分发，不入库
 assets/characters/*

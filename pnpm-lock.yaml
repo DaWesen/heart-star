@@ -66,6 +66,9 @@ importers:
       '@tauri-apps/api':
         specifier: ^2.12.4
         version: 2.12.4
+      pixi-live2d-display:
+        specifier: 0.5.0-beta
+        version: 0.5.0-beta(pixi.js@7.4.3)
       pixi.js:
         specifier: ^7.4.0
         version: 7.4.3
@@ -1230,6 +1233,11 @@ packages:
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
 
+  pixi-live2d-display@0.5.0-beta:
+    resolution: {integrity: sha512-U2G20FnhmrepYuvWB4l0CLyIH43kz1lusuX9aC05+Ed11aBQCJIBKadIJuSzKXV6sqjTiH1aBZrS/CR2aUrEBQ==}
+    peerDependencies:
+      pixi.js: ^7.0.0
+
   pixi.js@7.4.3:
     resolution: {integrity: sha512-uIWdH0EI2dVgNoqN9aFaHCmR0V65OEhMkXs2sek3c/QP2ItV6UoM+ouX9esSv3ibo20F+J5D1XwnQhUZI6wqeQ==}
 
@@ -2288,6 +2296,10 @@ snapshots:
       minipass: 7.1.3
 
   picocolors@1.1.1: {}
+
+  pixi-live2d-display@0.5.0-beta(pixi.js@7.4.3):
+    dependencies:
+      pixi.js: 7.4.3
 
   pixi.js@7.4.3:
     dependencies:

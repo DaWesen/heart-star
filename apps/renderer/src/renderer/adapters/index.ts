@@ -17,9 +17,10 @@ export async function createAdapter(
       return new PlaceholderAdapter(container);
     }
 
-    case 'live2d':
-      // M2：PixiJS v7 + pixi-live2d-display + Cubism 5 Web SDK
-      throw new Error('Live2D adapter 于 M2 实现');
+    case 'live2d': {
+      const { Live2DAdapter } = await import('./Live2DAdapter');
+      return new Live2DAdapter(container);
+    }
 
     case 'vrm':
       // M5：three.js + @pixiv/three-vrm

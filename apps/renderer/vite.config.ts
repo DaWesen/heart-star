@@ -1,23 +1,65 @@
 import { existsSync, mkdirSync, readFileSync, copyFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { ServerResponse } from 'node:http';
 import { defineConfig, type Plugin } from 'vite';
 
 /** workspace 包直连源码，避免每次改动都要先打包依赖 */
 const resolveWorkspace = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 
 const CHARACTERS_SRC = resolveWorkspace('../../assets/characters');
+/** Cubism SDK 本体放这里。不入库（许可不允许再分发），dev 从本地读。 */
+const VENDOR_SRC = resolveWorkspace('vendor');
+
+/** 常见资源后缀 → MIME。贴图必须给对类型，否则 Pixi 会把它当二进制拒绝解码。 */
+const MIME: Record<string, string> = {
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.moc3': 'application/octet-stream',
+  '.wav': 'audio/wav',
+  '.mp3': 'audio/mpeg',
+};
+
+const mimeOf = (file: string): string =>
+  MIME[path.extname(file).toLowerCase()] ?? 'application/octet-stream';
 
 /**
- * 让渲染层能 fetch 到 `/characters/<id>/manifest.json`。
+ * dev 下把仓库外的目录挂到 URL 前缀上。
  *
- * 角色包在仓库根的 assets/ 下，不在 renderer 的 vite root 里，
- * dev 与 build 都不会自动带上它。发布时角色包要走 Tauri 的 resource 机制
- * （M3「角色包从外部加载」），这里是让当前 dev 与构建能跑起来的过渡手段。
+ * 两个用途：
+ *  1. `/characters/<id>/…` —— 角色包在仓库根的 assets/ 下，不在 renderer 的
+ *     vite root 里。dev 要能取到 moc3 / 贴图 / 动作，构建时只拷 manifest
+ *     （见下），发布形态另走 Tauri resource 机制（M3「角色包从外部加载」）。
+ *  2. `/vendor/…` —— Cubism Core。它不许随包再分发，只能从本地目录读。
  *
- * 构建时**只拷 manifest.json**：moc3 与贴图是几 MB 级的，
- * 而渲染层此刻只用到 manifest 里的 kind / semantics，拷全量纯属浪费。
+ * 两个前缀都做了目录穿越防护：路径来自 URL，不能假设干净。
  */
+function serveOutsideRoot(root: string, prefix: string) {
+  return (req: { url?: string }, res: ServerResponse, next: () => void) => {
+    const url = req.url ?? '';
+    if (!url.startsWith(prefix)) return next();
+
+    const rel = url.slice(prefix.length).split('?')[0] ?? '';
+    const file = path.resolve(root, rel);
+
+    // 穿越或文件不存在都直接 404，不能 return next()：
+    // 否则请求会漏到 Vite 的 SPA 兜底，拿到 200 + index.html，
+    // 而 Cubism Core 的缺失诊断正是靠"取不到"来触发的 —— 拿到一段 HTML
+    // 会让报错变成"文件在但没挂上全局"，把用户引到错误的排查方向。
+    if (!file.startsWith(root) || !existsSync(file)) {
+      res.statusCode = 404;
+      res.end('Not Found');
+      return;
+    }
+
+    res.setHeader('Content-Type', mimeOf(file));
+    res.end(readFileSync(file));
+  };
+}
+
 function serveCharacters(): Plugin {
   let distDir = '';
 
@@ -29,24 +71,15 @@ function serveCharacters(): Plugin {
     },
 
     configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        const url = req.url ?? '';
-        if (!url.startsWith('/characters/')) return next();
-
-        const rel = url.slice('/characters/'.length).split('?')[0] ?? '';
-        const file = path.resolve(CHARACTERS_SRC, rel);
-        // 目录穿越防护：解析后的路径必须仍在角色目录内。
-        // 请求来自面板经壳层转发的 characterId，不能假设它一定干净。
-        if (!file.startsWith(CHARACTERS_SRC) || !existsSync(file)) return next();
-
-        res.setHeader(
-          'Content-Type',
-          file.endsWith('.json') ? 'application/json; charset=utf-8' : 'application/octet-stream',
-        );
-        res.end(readFileSync(file));
-      });
+      server.middlewares.use(serveOutsideRoot(CHARACTERS_SRC, '/characters/'));
+      server.middlewares.use(serveOutsideRoot(VENDOR_SRC, '/vendor/'));
     },
 
+    // 构建时**只拷 manifest.json**：
+    // dev 是直接从 assets/ 读整个角色包的，构建产物不这么做——
+    // moc3 与贴图是几 MB 级，塞进前端产物既臃肿又不利于分发。
+    // 发布形态的角色资产走 Tauri resource 机制（M3「角色包从外部加载」），
+    // 到时这里会改成拷贝全量或直接打包。
     closeBundle() {
       if (!distDir || !existsSync(CHARACTERS_SRC)) return;
 

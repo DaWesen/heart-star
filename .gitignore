@@ -20,6 +20,11 @@ apps/desktop/src-tauri/target/
 # 库 crate 的 lock 不入库（只有最终产物 apps/desktop/src-tauri 的 Cargo.lock 需要锁定）
 packages/ai-core/Cargo.lock
 
+# ---------- 第三方 SDK 本体 ----------
+# Cubism SDK 不允许随包再分发（工程计划 §11），由使用者自行下载。
+# 只保留目录里的说明文档，本体一律不入库。
+apps/renderer/vendor/*.js
+
 # ---------- 角色资产 ----------
 # 二进制素材（moc3 / 贴图 / 动作）体积大，且各自受授权条款约束，走独立分发，不入库。
 # manifest.json 等文本元数据**仍入库**：它是构建期校验的输入，

@@ -10,6 +10,7 @@ pub mod lifecycle;
 pub mod window;
 
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -220,9 +221,10 @@ struct SyncedState {
 /// 三个职责，都是"低频轮询 + 走状态机"，绝不在别处直接调 SetParent：
 ///  1. 宿主是否还活着 —— 宿主是外部窗口，销毁不会通知我们，只能轮询。
 ///     漏掉这个检测，宠物会永远卡在面板形态里叫不回来。
-///  2. 双击宠物触发的切换请求（钩子置位，这里执行）。
+///  2. 双击宠物触发的切换请求（钩子置位，这里判定、主线程执行）。
 ///  3. 把形态与缩放同步给渲染层。
 ///
+/// 本线程只**判定**，不碰窗口：真正的窗口操作由 `dispatch_window_work` 派给主线程。
 fn spawn_form_supervisor(app: AppHandle) {
     std::thread::spawn(move || {
         let mut synced: Option<SyncedState> = None;
@@ -230,47 +232,136 @@ fn spawn_form_supervisor(app: AppHandle) {
         loop {
             std::thread::sleep(SUPERVISOR_INTERVAL);
 
+            dispatch_window_work(&app);
+
+            // 状态同步只读不写窗口，留在监管线程即可
             let managed = app.state::<Mutex<window::PetWindow>>();
-            let mut pet = match managed.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    log_warn!("形态监管：状态机加锁失败: {e}");
-                    continue;
-                }
-            };
-
-            if let Err(e) = pet.ensure_valid() {
-                log_warn!("宿主失效回落失败: {e}");
+            let locked = managed.lock();
+            match &locked {
+                Ok(pet) => sync_renderer(&app, pet, &mut synced),
+                Err(e) => log_warn!("形态监管：状态机加锁失败: {e}"),
             }
-
-            if window::hook::take_toggle_request() {
-                let result = match pet.form() {
-                    Form::Desktop => match panel_hwnd(&app) {
-                        Some(host) => {
-                            // 面板默认是隐藏的，必须先显示**再**迁移：
-                            // 挂在隐藏窗口上的宠物等于跟着一起消失。
-                            show_panel(&app);
-                            let rect = host::current_rect(pet.hwnd());
-                            let area = centered_in(host, rect.width, rect.height);
-                            pet.to_panel(host, area)
-                        }
-                        // 面板还在后台准备（第二个 WebView2 初始化 + dev 下等 vite）。
-                        // 这一轮做不到，等下一次请求 —— 好过直接报错把状态机搞脏。
-                        None => Ok(()),
-                    },
-                    Form::Panel(_) => pet.to_desktop(),
-                    // 切换进行中：丢弃这次请求，下一次双击会重新触发
-                    Form::Transitioning => Ok(()),
-                };
-                match result {
-                    Ok(()) => log!("形态 -> {:?}", pet.form()),
-                    Err(e) => log_warn!("形态切换失败: {e}"),
-                }
-            }
-
-            sync_renderer(&app, &pet, &mut synced);
         }
     });
+}
+
+/// 这一轮要主线程做的窗口工作。
+#[derive(Debug, Clone, Copy)]
+enum WindowWork {
+    /// 挂载进面板
+    ToPanel,
+    /// 回到桌面
+    ToDesktop,
+    /// 宿主失效，强制回落
+    Fallback,
+}
+
+/// 主线程是否还有未完成的工作。主线程单次任务是原子的，没跑完就不再叠
+/// 一次任务上去——两个形态切换并发会把宠物搬丢。
+static WINDOW_WORK_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 判定这一轮要做什么，然后派给主线程执行。
+///
+/// **为什么必须派回主线程**：Win32 窗口属于创建它的线程，形态切换还要装/卸
+/// `WH_MOUSE_LL` 钩子，而低层钩子只在"安装它的那个线程取消息时"才会回调。
+/// 监管线程没有消息循环，在这里装钩子等于把钩子彻底闷死 ——
+/// 表现为切回桌面之后宠物既不响应双击、连穿透都不会再摘掉，
+/// 而且日志毫无痕迹，只能靠"宠物突然变砖"才发现。
+fn dispatch_window_work(app: &AppHandle) {
+    let Ok(work) = judged_work(app) else {
+        return;
+    };
+
+    if WINDOW_WORK_BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    // 两份句柄各司其职：派发给 `handle`，闭包里用的是 `worker`。
+    // 同一个 AppHandle 既被借用派发又被 move 进闭包，编译器不会放行。
+    let handle = app.clone();
+    let worker = app.clone();
+    let dispatched = handle.run_on_main_thread(move || {
+        run_window_work(&worker, work);
+        WINDOW_WORK_BUSY.store(false, Ordering::SeqCst);
+    });
+
+    if dispatched.is_err() {
+        WINDOW_WORK_BUSY.store(false, Ordering::SeqCst);
+        log_warn!("形态任务派发失败");
+    }
+}
+
+/// 只读判定本轮是否有活干。刻意不在这里做任何窗口写操作。
+fn judged_work(app: &AppHandle) -> Result<WindowWork, ()> {
+    let managed = app.state::<Mutex<window::PetWindow>>();
+    let pet = managed.lock().map_err(|_| ())?;
+
+    // 宿主失效优先于用户的切换请求：先救回宠物再谈别的
+    if host_lost(&pet) {
+        return Ok(WindowWork::Fallback);
+    }
+
+    if window::hook::take_toggle_request() {
+        match pet.form() {
+            Form::Desktop => Ok(WindowWork::ToPanel),
+            Form::Panel(_) => Ok(WindowWork::ToDesktop),
+            // 切换进行中：丢弃这次请求，下一次双击会重新触发
+            Form::Transitioning => Err(()),
+        }
+    } else {
+        Err(())
+    }
+}
+
+/// 宿主是否失效。只读判定，不做任何恢复动作。
+fn host_lost(pet: &window::PetWindow) -> bool {
+    match pet.form() {
+        Form::Panel(host) => !host::is_alive(host) || !host::is_visible(host),
+        _ => false,
+    }
+}
+
+/// 真正的窗口操作。只在主线程执行。
+fn run_window_work(app: &AppHandle, work: WindowWork) {
+    let managed = app.state::<Mutex<window::PetWindow>>();
+    let mut pet = match managed.lock() {
+        Ok(guard) => guard,
+        Err(e) => {
+            log_warn!("形态切换：状态机加锁失败: {e}");
+            return;
+        }
+    };
+
+    let result = match work {
+        WindowWork::Fallback => Some(pet.ensure_valid()),
+        WindowWork::ToDesktop => Some(pet.to_desktop()),
+        WindowWork::ToPanel => match panel_hwnd(app) {
+            Some(host) => {
+                // 面板默认是隐藏的，必须先显示**再**迁移：
+                // 挂在隐藏窗口上的宠物等于跟着一起消失。
+                show_panel(app);
+                let rect = host::current_rect(pet.hwnd());
+                let area = centered_in(host, rect.width, rect.height);
+                Some(pet.to_panel(host, area))
+            }
+            // 面板还在后台准备（第二个 WebView2 初始化 + dev 下等 vite）。
+            // 这一轮做不到，直接告知用户 —— 静默丢弃会让人以为双击没生效。
+            None => {
+                log_warn!("面板尚未就绪，本次切换请求已丢弃");
+                None
+            }
+        },
+    };
+
+    if let Some(result) = result {
+        match result {
+            Ok(()) => log!("形态 -> {:?}", pet.form()),
+            Err(e) => log_warn!("形态切换失败: {e}"),
+        }
+    }
 }
 
 /// 把壳侧的形态与缩放同步给渲染层。

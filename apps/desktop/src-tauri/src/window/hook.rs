@@ -23,7 +23,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetWindowRect, SetWindowPos, SetWindowsHookExW,
     UnhookWindowsHookEx, HHOOK, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WH_MOUSE_LL,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
 };
 
 use super::WindowError;
@@ -67,15 +67,87 @@ pub fn take_toggle_request() -> bool {
     TOGGLE_REQUESTED.swap(false, Ordering::Relaxed)
 }
 
-/// 供托盘等入口请求一次形态切换。钩子自己置位，真正的切换由监管线程执行。
+/// 请求一次形态切换。任何入口（托盘菜单等）都能直接调用。
+///
+/// 刻意**不做命中判定**：判定是钩子那条路径（双击）的事。
+/// 合在一起的话，面板形态下钩子已卸载、状态为空，托盘菜单会静默失效——
+/// 用户点了"切换形态"却毫无反应，日志里也什么都看不到。
 pub fn request_toggle() {
-    if let Ok(guard) = HOOK_STATE.lock() {
-        // 只在指针位于宠物上时才认这次双击。
-        // `transparent == false` 即"当前未穿透"，也就是指针在窗口内。
-        if guard.as_ref().is_some_and(|s| !s.transparent) {
-            TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
+    TOGGLE_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// 上一次按下的时刻与位置。双击判定要自己维护，理由见 `is_double_click`。
+struct LastPress {
+    /// Unix 毫秒
+    at: u64,
+    x: i32,
+    y: i32,
+}
+
+static LAST_PRESS: Mutex<Option<LastPress>> = Mutex::new(None);
+
+/// 双击时间上限。与 Windows 默认双击速度（500ms）保持一致，
+/// 用户自己在控制面板里改过的话这里也没必要跟——桌宠只需要一个够用的值。
+const DOUBLE_CLICK_MS: u64 = 500;
+/// 位置容差（物理像素）。手抖不该算两次点击在不同位置。
+const DOUBLE_CLICK_SLOP: i32 = 4;
+
+/// 自己判双击，而不是依赖 `WM_LBUTTONDBLCLK`。
+///
+/// 实测双击消息到不了钩子：真正接收鼠标消息的是宠物的子层 WebView
+/// （`Chrome_WidgetWin_1`），而顶层窗口的类是 tao 注册的 `Tauri Window`，
+/// 类样式里**没有 `CS_DBLCLKS`** —— 没有这个位，系统压根不会生成双击消息。
+/// 于是"双击宠物"长期以来只能靠运气： pane 形态、指针落在哪一层都会影响结果。
+///
+/// 自己在 `WM_LBUTTONDOWN` 上数次数就不看这些脸色了：
+/// 间隔在阈值内、位置又没挪动，就是一次双击。另外也只有指针位于宠物上才算，
+/// 否则双击桌面任何地方都会切换形态。
+fn is_double_click() -> bool {
+    // 先看指针是否在宠物上：`transparent == false` 即"当前未穿透"。
+    {
+        let Ok(guard) = HOOK_STATE.lock() else {
+            return false;
+        };
+        if !guard.as_ref().is_some_and(|s| !s.transparent) {
+            return false;
         }
     }
+
+    let mut pt = POINT::default();
+    if unsafe { GetCursorPos(&mut pt) }.is_err() {
+        return false;
+    }
+
+    let Ok(mut last) = LAST_PRESS.lock() else {
+        return false;
+    };
+    let now = now_ms();
+
+    let is_double = last.as_ref().is_some_and(|prev| {
+        now.saturating_sub(prev.at) <= DOUBLE_CLICK_MS
+            && (pt.x - prev.x).abs() <= DOUBLE_CLICK_SLOP
+            && (pt.y - prev.y).abs() <= DOUBLE_CLICK_SLOP
+    });
+
+    // 命中就清掉记录：否则三连击会被判成两次双击，形态来回跳
+    *last = if is_double {
+        None
+    } else {
+        Some(LastPress {
+            at: now,
+            x: pt.x,
+            y: pt.y,
+        })
+    };
+
+    is_double
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn stamp_interaction() {
@@ -138,6 +210,10 @@ extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRES
 
         match wparam.0 as u32 {
             WM_LBUTTONDOWN => {
+                // 双击在这里自己判，不用 WM_LBUTTONDBLCLK —— 理由见 is_double_click
+                if is_double_click() {
+                    request_toggle();
+                }
                 let _ = begin_drag();
             }
             WM_MOUSEMOVE => {
@@ -145,9 +221,6 @@ extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRES
             }
             WM_LBUTTONUP => {
                 let _ = end_drag();
-            }
-            WM_LBUTTONDBLCLK => {
-                request_toggle();
             }
             _ => {}
         }

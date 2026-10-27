@@ -243,6 +243,53 @@ function CharacterPicker() {
 }
 
 /**
+ * 开机自启开关。
+ *
+ * 勾选后由壳层写 Windows 的 Run 键（当前用户，不需要提权），
+ * 面板既拿不到文件系统也不知道注册表 —— 它只知道一个布尔值。
+ *
+ * 状态一律听壳层下发（`autostartChanged`）：写入可能被系统策略或杀软拦下，
+ * 回显是**写完回读**的结果，所以失败时勾选框会自己弹回去，
+ * 不会出现"勾上了但其实没生效"这种假象。
+ *
+ * 自己绑一次 IPC 而不是从 CharacterPicker 那边的订阅里分一口：
+ * 面板里每一项设置各自把住自己的那条消息，加一项功能不必去动别人 ——
+ * 壳侧的 ready 处理是幂等的（重发列表 + 重发自启状态），多订阅者没有副作用。
+ */
+function AutostartToggle() {
+  const [enabled, setEnabled] = useState(false);
+
+  useEffect(() => {
+    return bindPanelIpc((cmd) => {
+      switch (cmd.type) {
+        case 'autostartChanged':
+          setEnabled(cmd.enabled);
+          break;
+      }
+    });
+  }, []);
+
+  return (
+    <div style={{ marginTop: 14, borderTop: '1px solid #e6ebf2', paddingTop: 10 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => {
+            // 先本地跟手，再下发。等壳层回显才动的话，勾一下会有肉眼可见的延迟，
+            // 而且失败了回显会把状态拨回去，不需要这里先做判断。
+            setEnabled(e.target.checked);
+            sendPanelEvent({ type: 'setAutostart', enabled: e.target.checked });
+          }}
+          style={{ accentColor: '#ff8fb1' }}
+        />
+        <span>开机自启</span>
+      </label>
+    </div>
+  );
+}
+
+/**
  * 关于页 —— 署名展示的产品侧落地。
  *
  * 代码分发时的署名靠 LICENSE 里的 `Required Notice:` 行（许可证强制义务）；
@@ -275,6 +322,7 @@ export function App() {
 
       <div style={panelRight}>
         <CharacterPicker />
+        <AutostartToggle />
         {/* TODO(M3)：人设 / 语音 / 快捷键 */}
       </div>
 

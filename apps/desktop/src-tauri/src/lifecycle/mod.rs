@@ -3,6 +3,14 @@
 //! 进程的存活管理都集中在这里，避免散落到各模块。
 //! 看门狗与自动更新属于发布期功能（M6），托盘与开机自启属于 M1。
 
+mod autostart;
+
+/// 开机自启：读 / 写当前用户的 Run 键。
+///
+/// 实现放在子模块，这里只做再导出。本层的对外形状就停在"设/读一个布尔值"，
+/// 面板那套术语属于 `ipc::panel`。
+pub use autostart::{auto_launch_enabled, set_auto_launch};
+
 use tauri::menu::MenuBuilder;
 use tauri::tray::TrayIconBuilder;
 use tauri::AppHandle;
@@ -52,9 +60,5 @@ pub fn spawn_watchdog(_app: AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 开机自启。
-///
-/// TODO(M6)：注册表/任务计划实现，需要用户授权。
-pub fn set_auto_launch(_app: &AppHandle, _enabled: bool) -> tauri::Result<()> {
-    Ok(())
-}
+// 开机自启的实现在 `autostart` 子模块：写 HKCU 的 Run 键，不需要提权。
+// 这里刻意只做再导出，不夹带任何面板语义 —— 那条线属于 `ipc::panel`。

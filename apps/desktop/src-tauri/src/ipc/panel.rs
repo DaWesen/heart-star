@@ -18,6 +18,7 @@ use super::generated::{
     CHANNEL_PANEL_EVENT,
 };
 use super::{send, ShellCommand, PET_LABEL};
+use crate::lifecycle::{auto_launch_enabled, set_auto_launch};
 use crate::logging::{log, log_warn};
 
 /// 壳 → 面板：下发一条命令。全局广播 —— 面板可能还没建出来，那时自然无人接收。
@@ -59,6 +60,7 @@ fn handle_event(app: &AppHandle, evt: PanelEvent) {
         PanelEvent::Ready => {
             log!("面板已就绪");
             send_character_list(app);
+            send_autostart_state(app);
         }
         PanelEvent::SwitchCharacter { character_id } => {
             let Some(pet) = app.get_webview_window(PET_LABEL) else {
@@ -80,6 +82,28 @@ fn handle_event(app: &AppHandle, evt: PanelEvent) {
                 log_warn!("缩放下发失败: {e}");
             }
         }
+        PanelEvent::SetAutostart { enabled } => {
+            // 开机自启没有窗口、没有任务栏入口，开关成没成肉眼看不见，
+            // 所以这条链路必须留痕 —— 否则"设了但没生效"无从查起
+            log!("开机自启 -> {}", if enabled { "开" } else { "关" });
+            if let Err(e) = set_auto_launch(enabled) {
+                log_warn!("开机自启设置失败: {e}");
+            }
+            // 下发的不是用户刚输入的值，而是写完后**回读**的结果：
+            // 写失败时面板上的勾选框会被拨回去，用户看到的始终是真实状态
+            send_autostart_state(app);
+        }
+    }
+}
+
+/// 下发开机自启状态。
+///
+/// 与角色列表同一个调用时机：面板就绪时一次、每次显示面板再一次。
+/// 少任何一次，HMR 重载后勾选框就会停在错误的初始值上。
+pub fn send_autostart_state(app: &AppHandle) {
+    let enabled = auto_launch_enabled();
+    if let Err(e) = send_panel(app, &PanelCommand::AutostartChanged { enabled }) {
+        log_warn!("开机自启状态下发失败: {e}");
     }
 }
 

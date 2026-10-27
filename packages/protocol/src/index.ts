@@ -106,7 +106,15 @@ export const CHARACTER_SCALE = { min: 0.5, max: 2, default: 1, step: 0.05 } as c
 export type PanelEvent =
   | { type: 'ready' }
   | { type: 'switchCharacter'; characterId: string }
-  | { type: 'setCharacterScale'; scale: number };
+  | { type: 'setCharacterScale'; scale: number }
+  /**
+   * 开关开机自启。
+   *
+   * 只有"设"，没有"读"：状态一律由壳下发（见 `PanelCommand.autostartChanged`），
+   * 面板不主动查询。读也走一条消息的话，两边就都能持有各自的版本，
+   * 而"谁的状态才是真的"这个问题不该存在 —— 真相只有注册表那一份。
+   */
+  | { type: 'setAutostart'; enabled: boolean };
 
 /**
  * 壳 → 面板
@@ -121,7 +129,15 @@ export type PanelCommand =
   /** 切换失败（如 adapter 未实现、manifest 解析失败）。面板要能把原因显示出来 */
   | { type: 'characterFailed'; message: string }
   /** 缩放已生效，值为夹紧后的结果。面板滑块据此回显 */
-  | { type: 'characterScaled'; characterId: string; scale: number };
+  | { type: 'characterScaled'; characterId: string; scale: number }
+  /**
+   * 开机自启状态。
+   *
+   * 带的是**写完后回读**的结果，不是用户刚输入的值：注册表写入可能被策略或
+   * 杀软拦下，此时回显会把面板上的勾选拨回去。用户看到的永远是真实状态，
+   * 而不是"我以为设成功了"。
+   */
+  | { type: 'autostartChanged'; enabled: boolean };
 
 // ---------- AI → 渲染（流式）----------
 

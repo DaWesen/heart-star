@@ -27,6 +27,8 @@ windows = { version = "0.62", features = [
   "Win32_Graphics_Dwm",
   "Win32_UI_HiDpi",
   "Win32_UI_Shell",
+  # 开机自启：HKCU\...\Run 的读写从这里走，不为此引入额外的注册表依赖
+  "Win32_System_Registry",
 ] }
 
 [features]

@@ -94,6 +94,11 @@ pub enum PanelCommand {
         #[serde(rename = "scale")]
         scale: f64,
     },
+    #[serde(rename = "autostartChanged")]
+    AutostartChanged {
+        #[serde(rename = "enabled")]
+        enabled: bool,
+    },
 }
 
 /// 面板 → 壳
@@ -111,6 +116,11 @@ pub enum PanelEvent {
     SetCharacterScale {
         #[serde(rename = "scale")]
         scale: f64,
+    },
+    #[serde(rename = "setAutostart")]
+    SetAutostart {
+        #[serde(rename = "enabled")]
+        enabled: bool,
     },
 }
 

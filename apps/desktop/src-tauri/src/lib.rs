@@ -413,6 +413,9 @@ pub(crate) fn show_panel(app: &AppHandle) {
     // 每次显示都补发一次角色列表：面板页面可能被 HMR 重载，
     // 只在 ready 时发一次的话重载后按钮就没了
     ipc::panel::send_character_list(app);
+    // 开机自启同理 —— 而且它的真相在注册表里，用户可以在系统设置里改，
+    // 每次都重读一次才能跟上外部改动
+    ipc::panel::send_autostart_state(app);
 }
 
 /// 把宠物摆到宿主客户区中央。

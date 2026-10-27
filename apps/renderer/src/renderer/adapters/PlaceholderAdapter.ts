@@ -6,6 +6,7 @@ import type {
   SemanticBone,
 } from '@heart-star/character-schema';
 import type { CharacterRenderer, MotionRequest } from '../CharacterRenderer';
+import { CHARACTER_SCALE } from '@heart-star/protocol';
 
 /**
  * 占位角色 —— M1 专用
@@ -40,6 +41,7 @@ export class PlaceholderAdapter implements CharacterRenderer {
   private lipSync = 0;
   private width = 320;
   private height = 420;
+  private userScale: number = CHARACTER_SCALE.default;
 
   constructor(private readonly container: HTMLElement) {
     this.node = document.createElement('div');
@@ -111,6 +113,14 @@ export class PlaceholderAdapter implements CharacterRenderer {
     this.applyBounds();
   }
 
+  setScale(scale: number): void {
+    this.userScale = Math.min(
+      CHARACTER_SCALE.max,
+      Math.max(CHARACTER_SCALE.min, scale),
+    );
+    this.applyBounds();
+  }
+
   render(dt: number): void {
     this.elapsed += dt;
 
@@ -138,7 +148,7 @@ export class PlaceholderAdapter implements CharacterRenderer {
    * 尺寸错了方块会明显偏大或偏小，而这是 DPI 换算最容易出问题的地方。
    */
   private applyBounds(): void {
-    this.node.style.width = `${Math.round(this.width * BLOCK_WIDTH_RATIO)}px`;
-    this.node.style.height = `${Math.round(this.height * BLOCK_HEIGHT_RATIO)}px`;
+    this.node.style.width = `${Math.round(this.width * BLOCK_WIDTH_RATIO * this.userScale)}px`;
+    this.node.style.height = `${Math.round(this.height * BLOCK_HEIGHT_RATIO * this.userScale)}px`;
   }
 }

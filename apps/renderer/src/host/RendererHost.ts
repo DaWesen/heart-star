@@ -1,6 +1,7 @@
 import type { CharacterManifest, RendererCapabilities } from '@heart-star/character-schema';
 import type { PetForm } from '@heart-star/protocol';
 import { loadManifest } from '../character/manifest';
+import { CHARACTER_SCALE } from '@heart-star/protocol';
 import type { CharacterRenderer } from '../renderer/CharacterRenderer';
 import { createAdapter } from '../renderer/adapters';
 import { FrameScheduler, type FrameRate } from './FrameScheduler';
@@ -35,6 +36,12 @@ export class RendererHost {
   private readonly scheduler: FrameScheduler;
   private renderer: CharacterRenderer | null = null;
   private capabilities: RendererCapabilities | null = null;
+  /**
+   * 用户缩放倍率，存在宿主而不是 adapter 上。
+   * 换角色是"换掉整个 adapter"，倍率是用户偏好，不该跟着 adapter 一起丢。
+   */
+  private scale: number = CHARACTER_SCALE.default;
+  private characterId: string | null = null;
 
   /**
    * 帧统计回调，由 IpcBridge 注入。
@@ -65,9 +72,18 @@ export class RendererHost {
     const next = await createAdapter(manifest.kind, this.element);
     await next.load(manifest);
 
+    // 把当前倍率带给新角色：用户调好的大小不该因为换角色被重置
+    next.setScale?.(this.scale);
+
     this.renderer?.dispose();
     this.renderer = next;
     this.capabilities = next.capabilities;
+    this.characterId = manifest.id;
+  }
+
+  /** 当前角色 id。角色切换完成前为 null。 */
+  getCharacterId(): string | null {
+    return this.characterId;
   }
 
   /** 按 id 切换角色：加载 manifest → 建 adapter → 换掉旧的。 */
@@ -105,6 +121,31 @@ export class RendererHost {
 
   setBounds(width: number, height: number): void {
     this.renderer?.setBounds(width, height);
+  }
+
+  /**
+   * 设置用户缩放倍率。
+   *
+   * 返回**夹紧后**的实际生效值：面板滑块要回显它，否则拖到边界时
+   * 显示的百分比和模型实际大小对不上。没有角色时返回 null（无从生效）。
+   */
+  setScale(scale: number): number | null {
+    const next = Math.min(
+      CHARACTER_SCALE.max,
+      Math.max(CHARACTER_SCALE.min, Number.isFinite(scale) ? scale : CHARACTER_SCALE.default),
+    );
+    this.scale = next;
+
+    const renderer = this.renderer;
+    if (!renderer) return null;
+
+    renderer.setScale?.(next);
+    return next;
+  }
+
+  /** 当前生效的缩放倍率 */
+  getScale(): number {
+    return this.scale;
   }
 
   private tick(dt: number): void {

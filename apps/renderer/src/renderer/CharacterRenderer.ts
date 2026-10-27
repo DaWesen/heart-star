@@ -62,6 +62,15 @@ export interface CharacterRenderer {
 
   setBounds(width: number, height: number): void;
 
+  /**
+   * 用户缩放倍率。作用在 manifest.defaultScale **之上**。
+   *
+   * 可选方法：resize 与缩放不是一回事（前者改画布、后者改角色大小），
+   * 但也不是每个后端都需要单独实现 —— 有些后端靠 setBounds 里的整体
+   * 缩放矩阵就能顺带处理。留成可选，避免逼每个 adapter 都填一遍空壳。
+   */
+  setScale?(scale: number): void;
+
   /** 每帧调用。dt 单位秒。 */
   render(dt: number): void;
 

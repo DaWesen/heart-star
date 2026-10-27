@@ -70,6 +70,16 @@ fn handle_event(app: &AppHandle, evt: PanelEvent) {
                 log_warn!("切换角色下发失败: {e}");
             }
         }
+        PanelEvent::SetCharacterScale { scale } => {
+            let Some(pet) = app.get_webview_window(PET_LABEL) else {
+                log_warn!("宠物窗口不存在，忽略缩放请求");
+                return;
+            };
+            let cmd = ShellCommand::SetCharacterScale { scale };
+            if let Err(e) = send(&pet, &cmd) {
+                log_warn!("缩放下发失败: {e}");
+            }
+        }
     }
 }
 

@@ -89,6 +89,9 @@ export class IpcBridge {
       case 'switchCharacter':
         this.switchCharacter(cmd.characterId);
         break;
+      case 'setCharacterScale':
+        this.setCharacterScale(cmd.scale);
+        break;
       case 'setInputMode':
         // 输入模式由壳层通过窗口样式实现，渲染层无需动作
         break;
@@ -112,6 +115,22 @@ export class IpcBridge {
         message: e instanceof Error ? e.message : String(e),
         fatal: false,
       });
+    }
+  }
+
+  /**
+   * 缩放当前角色。
+   *
+   * 事件里回传的是夹紧后的值：面板滑块拖到底时，它显示的数字必须和
+   * 模型实际大小一致，否则用户会以为是延迟或丢事件。
+   */
+  private setCharacterScale(scale: number): void {
+    const applied = this.host.setScale(scale);
+    if (applied === null) return;
+
+    const id = this.host.getCharacterId();
+    if (id) {
+      this.emit({ type: 'characterScaled', characterId: id, scale: applied });
     }
   }
 

@@ -75,6 +75,21 @@ fn handle(window: &WebviewWindow, evt: RendererEvent) {
                 log_warn!("切换结果下发面板失败: {e}");
             }
         }
+        RendererEvent::CharacterScaled {
+            character_id,
+            scale,
+        } => {
+            let app = window.app_handle();
+            if let Err(e) = panel::send_panel(
+                app,
+                &PanelCommand::CharacterScaled {
+                    character_id,
+                    scale,
+                },
+            ) {
+                log_warn!("缩放结果下发面板失败: {e}");
+            }
+        }
         RendererEvent::Ready { capabilities } => {
             log!(
                 "渲染层就绪 | ik={} 加性层={} 物理={}",

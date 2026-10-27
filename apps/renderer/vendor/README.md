@@ -4,18 +4,32 @@
 
 ## 为什么它不在仓库里
 
-Live2D 的许可条款不允许把 Cubism SDK 本体随包再分发（见 `docs/engineering-plan.md` §11）。
-仓库里只留这份说明，`*.js` 一律 gitignore，由每位使用者自行下载。
+当初按"SDK 本体不得随包再分发"（工程计划 §11）处理，`*.js` 一律 gitignore，
+由每位使用者自行下载。
+
+**但这个前提需要修订**：SDK 里的 `Core/RedistributableFiles.txt` 明确把
+`live2dcubismcore.d.ts` / `live2dcubismcore.js` / `live2dcubismcore.min.js`
+列为**可再分发**文件（依据 Live2D Proprietary Software License Agreement）。
+也就是说把 Core 入库是被许可条款允许的 —— 185 KB 换掉一步手工配置，
+要不要这么做留待拍板；在此之前仍按下述步骤自行放置。
 
 ## 怎么拿到
 
 1. 打开 Live2D 官网 <https://www.live2d.com/>，注册/登录账号；
-2. 下载 **Cubism SDK for Web**（版本号要与角色模型的 moc3 版本对得上 ——
-   `assets/characters/hiyori` 用的是 Cubism 4 系的示例模型）；
-3. 在解压出的 SDK 里找到 `Core/live2dcubismcore.min.js`；
-4. 把它复制到**本目录**下，文件名保持 `live2dcubismcore.min.js`。
+2. 下载 **Cubism SDK for Web — Cubism 4** 版本
+   （`CubismSdkForWeb-4-r.7.zip` 一类）。
+   版本要对得上：`assets/characters/hiyori` 用的是 Cubism 4 系示例模型，
+   `hiyori_pro_t11.model3.json` 里 `"Version": 3`。
+   Cubism 5 的 Core 与 pixi-live2d-display 的 cubism4 分支不保证兼容，
+   先用 4 系最稳；
+3. 解压后在 **`<SDK>/Core/live2dcubismcore.min.js`** 找到它
+   （注意不是 `Framework/` 下的，也不是 `Core/live2dcubismcore.js` 之外的别的包）；
+4. 复制到**本目录**，文件名保持 `live2dcubismcore.min.js`。
 
-放好之后重启 dev server 即可，不需要改任何代码。
+放好之后重启 dev server（或 `make dev`）即可，不需要改任何代码。
+
+> 模型资源本身在 `assets/characters/hiyori/runtime/`（moc3、贴图、motion3），
+> 同样不入库，但**不需要**从这里下载 —— 由各自的角色包提供。
 
 ## 缺了会怎样
 

@@ -87,6 +87,13 @@ pub enum PanelCommand {
         #[serde(rename = "message")]
         message: String,
     },
+    #[serde(rename = "characterScaled")]
+    CharacterScaled {
+        #[serde(rename = "characterId")]
+        character_id: String,
+        #[serde(rename = "scale")]
+        scale: f64,
+    },
 }
 
 /// 面板 → 壳
@@ -99,6 +106,11 @@ pub enum PanelEvent {
     SwitchCharacter {
         #[serde(rename = "characterId")]
         character_id: String,
+    },
+    #[serde(rename = "setCharacterScale")]
+    SetCharacterScale {
+        #[serde(rename = "scale")]
+        scale: f64,
     },
 }
 
@@ -144,6 +156,13 @@ pub enum RendererEvent {
     CharacterSwitched {
         #[serde(rename = "characterId")]
         character_id: String,
+    },
+    #[serde(rename = "characterScaled")]
+    CharacterScaled {
+        #[serde(rename = "characterId")]
+        character_id: String,
+        #[serde(rename = "scale")]
+        scale: f64,
     },
     #[serde(rename = "hitTest")]
     HitTest {
@@ -204,6 +223,11 @@ pub enum ShellCommand {
     SwitchCharacter {
         #[serde(rename = "characterId")]
         character_id: String,
+    },
+    #[serde(rename = "setCharacterScale")]
+    SetCharacterScale {
+        #[serde(rename = "scale")]
+        scale: f64,
     },
     #[serde(rename = "setFrameBudget")]
     SetFrameBudget {

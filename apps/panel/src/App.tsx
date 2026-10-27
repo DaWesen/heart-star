@@ -13,8 +13,8 @@
  * 本窗口默认隐藏，由壳层在双击宠物时显示；关闭时壳层拦截并改为隐藏（不销毁）。
  */
 
-import { useEffect, useState } from 'react';
-import type { CharacterSummary } from '@heart-star/protocol';
+import { useEffect, useRef, useState } from 'react';
+import { CHARACTER_SCALE, type CharacterSummary } from '@heart-star/protocol';
 import { bindPanelIpc, sendPanelEvent } from './ipc';
 
 const ABOUT = {
@@ -127,15 +127,34 @@ const buttonActive: React.CSSProperties = {
 };
 
 /**
- * 角色切换。
+ * 拖动滑块时每帧都会触发一次 change。
+ * 不做节流的话一次拖拽就是上百条 IPC，全砸在通道上。
+ */
+const SCALE_THROTTLE_MS = 50;
+
+/**
+ * 角色切换与缩放。
  *
  * 列表由壳层扫描角色目录后下发 —— 面板与渲染层都拿不到文件系统，只有壳能读。
- * 切换也走壳层转发：渲染层只认壳这一个命令来源。
+ * 切换与缩放也走壳层转发：渲染层只认壳这一个命令来源。
  */
 function CharacterPicker() {
   const [characters, setCharacters] = useState<CharacterSummary[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [scale, setScale] = useState<number>(CHARACTER_SCALE.default);
+
+  // 节流用的两个 ref：定时器句柄 + 最后一次待发的值。
+  // 用 ref 而不是 state，是为了不因节流状态变化触发额外渲染。
+  const timer = useRef<number | null>(null);
+  const pending = useRef<number | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     return bindPanelIpc((cmd) => {
@@ -154,9 +173,27 @@ function CharacterPicker() {
           setError(cmd.message);
           setCurrent(null);
           break;
+        case 'characterScaled':
+          // 回显渲染层夹紧后的真实值：拖到边界时，这里的数字必须和模型实际大小一致
+          setScale(cmd.scale);
+          break;
       }
     });
   }, []);
+
+  const pushScale = (value: number) => {
+    pending.current = value;
+    if (timer.current !== null) return;
+
+    timer.current = window.setTimeout(() => {
+      timer.current = null;
+      const next = pending.current;
+      pending.current = null;
+      if (next !== null) {
+        sendPanelEvent({ type: 'setCharacterScale', scale: next });
+      }
+    }, SCALE_THROTTLE_MS);
+  };
 
   return (
     <div>
@@ -179,6 +216,28 @@ function CharacterPicker() {
       {error && (
         <div style={{ marginTop: 8, color: '#c0392b', fontSize: 12 }}>切换失败：{error}</div>
       )}
+
+      <div style={{ marginTop: 14, borderTop: '1px solid #e6ebf2', paddingTop: 10 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span>角色大小</span>
+          <span style={{ opacity: 0.6 }}>{Math.round(scale * 100)}%</span>
+        </div>
+        <input
+          type="range"
+          min={CHARACTER_SCALE.min}
+          max={CHARACTER_SCALE.max}
+          step={CHARACTER_SCALE.step}
+          value={scale}
+          // 本地先更新再节流下发：拖动过程要跟手，
+          // 等 IPC 往返再更新的话手感是黏的
+          onChange={(e) => {
+            const next = Number(e.target.value);
+            setScale(next);
+            pushScale(next);
+          }}
+          style={{ width: '100%', accentColor: '#ff8fb1' }}
+        />
+      </div>
     </div>
   );
 }

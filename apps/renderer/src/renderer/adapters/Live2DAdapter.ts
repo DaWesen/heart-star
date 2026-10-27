@@ -5,6 +5,7 @@ import type {
   SemanticParam,
 } from '@heart-star/character-schema';
 import type { CharacterRenderer, MotionRequest } from '../CharacterRenderer';
+import { CHARACTER_SCALE } from '@heart-star/protocol';
 import { ensureCubismCore } from '../../character/cubismCore';
 
 // 只用类型引用，不产生运行时依赖：pixi 与 pixi-live2d-display 都在 load() 里
@@ -63,6 +64,8 @@ export class Live2DAdapter implements CharacterRenderer {
   private manifest: CharacterManifest | null = null;
   private width = 0;
   private height = 0;
+  /** 用户缩放倍率。夹在 CHARACTER_SCALE 区间内，叠在 defaultScale 之上 */
+  private userScale: number = CHARACTER_SCALE.default;
 
   constructor(private readonly container: HTMLElement) {}
 
@@ -179,6 +182,11 @@ export class Live2DAdapter implements CharacterRenderer {
     this.applyBounds(width, height);
   }
 
+  setScale(scale: number): void {
+    this.userScale = clamp(scale, CHARACTER_SCALE.min, CHARACTER_SCALE.max);
+    this.fit();
+  }
+
   render(dt: number): void {
     const app = this.app;
     const model = this.model;
@@ -244,11 +252,18 @@ export class Live2DAdapter implements CharacterRenderer {
     return { min, max };
   }
 
-  /** model3.json 里的组名（Idle / TapBody…）与语义组名（idle / tap_body）对不上，做个兜底 */
+  /**
+   * 语义组名 → model3.json 里的组名。
+   *
+   * 两边的命名习惯不一样：model3 写 `Idle` / `Tap@Body`，语义组名是
+   * `idle` / `tap_body`。只比大小写的话 `tap_body` 对不上 `Tap@Body`（_ 对 @），
+   * 于是点击反馈会静默失效 —— 点宠物没反应，且日志里什么都没有。
+   * 这里按"去掉所有非字母数字后相等"来匹配。
+   */
   private resolveGroup(group: string): string {
     const definitions = this.internals()?.motionManager?.definitions ?? {};
-    const keys = Object.keys(definitions);
-    return keys.find((key) => key.toLowerCase() === group.toLowerCase()) ?? group;
+    const normalized = normalize(group);
+    return Object.keys(definitions).find((key) => normalize(key) === normalized) ?? group;
   }
 
   private applyBounds(width: number, height: number): void {
@@ -274,7 +289,7 @@ export class Live2DAdapter implements CharacterRenderer {
     if (!model || !manifest || this.width <= 0 || this.height <= 0) return;
 
     const fitScale = Math.min(this.width / model.width, this.height / model.height);
-    model.scale.set(fitScale * manifest.defaultScale);
+    model.scale.set(fitScale * manifest.defaultScale * this.userScale);
 
     model.anchor.set(manifest.anchor.x, manifest.anchor.y);
     model.position.set(this.width * manifest.anchor.x, this.height * manifest.anchor.y);
@@ -289,5 +304,10 @@ export class Live2DAdapter implements CharacterRenderer {
   }
 }
 
+const clamp = (v: number, min: number, max: number): number =>
+  v < min ? min : v > max ? max : v;
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
 const clampSigned = (v: number): number => (v < -1 ? -1 : v > 1 ? 1 : v);
+
+/** 组名比对用的归一化：忽略大小写与 @ _ - 这类分隔符差异 */
+const normalize = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]/g, '');

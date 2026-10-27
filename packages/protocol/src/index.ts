@@ -55,6 +55,14 @@ export type ShellCommand =
   | { type: 'setBounds'; x: number; y: number; width: number; height: number }
   /** 切换角色。渲染侧按 kind 懒加载对应 adapter，并完整 dispose 旧实例。 */
   | { type: 'switchCharacter'; characterId: string }
+  /**
+   * 缩放当前角色。
+   *
+   * 这是作用在 manifest.defaultScale **之上**的用户倍率：
+   * 美术定下"这个角色在画布里多大"，用户再按自己的摆放需要微调，
+   * 两者不该混成一个数字 —— 否则用户的偏好会随美术改 defaultScale 一起漂。
+   */
+  | { type: 'setCharacterScale'; scale: number }
   /** 帧预算。'paused' 用于窗口被完全遮挡时。 */
   | { type: 'setFrameBudget'; budget: FrameBudget }
   /** 鼠标归一化坐标（-1..1），供 GazeController 使用 */
@@ -66,6 +74,11 @@ export type RendererEvent =
   | { type: 'ready'; capabilities: RendererCapabilities }
   /** 角色切换完成。壳据此通知面板更新高亮 */
   | { type: 'characterSwitched'; characterId: string }
+  /**
+   * 缩放已生效。带的是**夹紧后**的实际值 —— 面板滑块据此回显，
+   * 否则用户把滑块拖到底，看到的数字和模型实际大小对不上。
+   */
+  | { type: 'characterScaled'; characterId: string; scale: number }
   /** 命中检测结果，语义部位；null 表示未命中 */
   | { type: 'hitTest'; area: SemanticArea | null }
   | { type: 'frameStats'; fps: number; frameMs: number }
@@ -80,10 +93,20 @@ export interface CharacterSummary {
   kind: CharacterKind;
 }
 
+/**
+ * 用户可调的角色缩放区间。
+ *
+ * 放在契约包而不是各自 app 里：面板滑块的 min/max 与渲染层的夹紧边界
+ * 必须是同一组数字，否则会出现"滑块显示 200% 但模型只到 150%"这类
+ * 两边各说各话的问题。
+ */
+export const CHARACTER_SCALE = { min: 0.5, max: 2, default: 1, step: 0.05 } as const;
+
 /** 面板 → 壳 */
 export type PanelEvent =
   | { type: 'ready' }
-  | { type: 'switchCharacter'; characterId: string };
+  | { type: 'switchCharacter'; characterId: string }
+  | { type: 'setCharacterScale'; scale: number };
 
 /**
  * 壳 → 面板
@@ -96,7 +119,9 @@ export type PanelCommand =
   /** 切换成功，面板据此更新"当前角色"高亮 */
   | { type: 'characterSwitched'; characterId: string }
   /** 切换失败（如 adapter 未实现、manifest 解析失败）。面板要能把原因显示出来 */
-  | { type: 'characterFailed'; message: string };
+  | { type: 'characterFailed'; message: string }
+  /** 缩放已生效，值为夹紧后的结果。面板滑块据此回显 */
+  | { type: 'characterScaled'; characterId: string; scale: number };
 
 // ---------- AI → 渲染（流式）----------
 

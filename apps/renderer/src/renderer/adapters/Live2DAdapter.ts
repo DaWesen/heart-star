@@ -216,7 +216,12 @@ export class Live2DAdapter implements CharacterRenderer {
   dispose(): void {
     // 只拆 app：children: true 会连带销毁挂在 stage 上的模型。
     // 再单独调一次 model.destroy() 会把它销毁两遍，Pixi 上表现为空指针。
-    this.app?.destroy(true, { children: true, texture: true, baseTexture: true });
+    //
+    // 纹理与 baseTexture **刻意不销毁**：切换角色时新实例要先建、旧的随后才拆，
+    // 两者并存期间纹理是同一批对象（Pixi 按来源缓存），销毁旧的会把新模型
+    // 正在用的纹理一起释放 —— 表现是角色变黑、身体变成一块长方形，
+    // 而控制台不会有任何报错，极难定位。纹理由全局缓存持有，不该由实例回收。
+    this.app?.destroy(true, { children: true, texture: false, baseTexture: false });
 
     this.model = null;
     this.app = null;

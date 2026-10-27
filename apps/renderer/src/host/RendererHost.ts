@@ -88,6 +88,14 @@ export class RendererHost {
 
   /** 按 id 切换角色：加载 manifest → 建 adapter → 换掉旧的。 */
   async switchCharacter(characterId: string): Promise<void> {
+    // 重复点同一个角色（双击按钮太容易发生）**不重新加载**。
+    // 重载要再建一个 Pixi Application、再解析一遍模型，而旧的要等新的就位
+    // 才能销毁 —— 两份并存期间旧实例销毁会把新模型正在用的资源一起释放，
+    // 表现为"角色变黑、身体变成一块长方形"。已经在显示的角色直接跳过。
+    //
+    // 只在**载入成功**后才记 id，所以上次失败过的角色还能重试。
+    if (characterId === this.characterId) return;
+
     const manifest = await loadManifest(characterId);
     await this.loadCharacter(manifest);
 

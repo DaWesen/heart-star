@@ -66,6 +66,16 @@ export class Live2DAdapter implements CharacterRenderer {
   private height = 0;
   /** 用户缩放倍率。夹在 CHARACTER_SCALE 区间内，叠在 defaultScale 之上 */
   private userScale: number = CHARACTER_SCALE.default;
+  /**
+   * 模型的**自然**画布尺寸（未叠加任何缩放），载入时锁定。
+   *
+   * 为什么必须单独存一份、而不是每次读 `model.width`：Pixi 的
+   * `DisplayObject.width` 是 `getLocalBounds() × scale`，**含当前 transform**。
+   * 拿它当 fit 的分母，就会变成"以上一次的结果算这一次"的自反馈：
+   * S_n · S_{n-1} = 常数，于是每按一次滑条就在"巨大 / 正常"之间来回跳。
+   */
+  private naturalWidth = 0;
+  private naturalHeight = 0;
 
   constructor(private readonly container: HTMLElement) {}
 
@@ -103,6 +113,12 @@ export class Live2DAdapter implements CharacterRenderer {
     });
 
     app.stage.addChild(model);
+
+    // 必须在"还没动过 scale"的这一刻取自然尺寸：
+    // 之后 model.width 就带上我们写的缩放了（见 naturalWidth 的注释）。
+    // 除以当前 scale 是为了连 SDK 自带的初始缩放也一并剥离。
+    this.naturalWidth = divide(model.width, model.scale.x);
+    this.naturalHeight = divide(model.height, model.scale.y);
 
     this.app = app;
     this.model = model;
@@ -288,7 +304,14 @@ export class Live2DAdapter implements CharacterRenderer {
     const manifest = this.manifest;
     if (!model || !manifest || this.width <= 0 || this.height <= 0) return;
 
-    const fitScale = Math.min(this.width / model.width, this.height / model.height);
+    // 用载入时锁定的自然尺寸，而不是 model.width —— 后者随已在生效的缩放变化，
+    // 会让 fit 变成自反馈（详见 naturalWidth 注释）。
+    const baseWidth = this.naturalWidth > 0 ? this.naturalWidth : divide(model.width, model.scale.x);
+    const baseHeight =
+      this.naturalHeight > 0 ? this.naturalHeight : divide(model.height, model.scale.y);
+    if (baseWidth <= 0 || baseHeight <= 0) return;
+
+    const fitScale = Math.min(this.width / baseWidth, this.height / baseHeight);
     model.scale.set(fitScale * manifest.defaultScale * this.userScale);
 
     model.anchor.set(manifest.anchor.x, manifest.anchor.y);
@@ -303,6 +326,10 @@ export class Live2DAdapter implements CharacterRenderer {
     };
   }
 }
+
+/** 剥离已生效的缩放，取回自然尺寸。scale 为 0 或非法时退回当前 width。 */
+const divide = (value: number, scale: number): number =>
+  Number.isFinite(scale) && scale !== 0 ? value / scale : value;
 
 const clamp = (v: number, min: number, max: number): number =>
   v < min ? min : v > max ? max : v;

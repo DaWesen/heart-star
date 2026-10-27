@@ -265,4 +265,11 @@ pub enum ShellCommand {
         #[serde(rename = "ny")]
         ny: f64,
     },
+    #[serde(rename = "tap")]
+    Tap {
+        #[serde(rename = "x")]
+        x: f64,
+        #[serde(rename = "y")]
+        y: f64,
+    },
 }

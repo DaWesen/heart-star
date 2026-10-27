@@ -35,7 +35,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             // 只显示，不改形态。用户可能只想想看面板而不想把宠物搬进去。
             "show_panel" => crate::show_panel(app),
-            // 与双击宠物等价：桌面 → 面板，面板 → 桌面
+            // 形态切换：桌面 → 面板，面板 → 桌面
             "toggle_form" => crate::window::hook::request_toggle(),
             "quit" => app.exit(0),
             _ => {}

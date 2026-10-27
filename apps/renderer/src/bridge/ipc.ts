@@ -1,5 +1,6 @@
 import { listen, emit } from '@tauri-apps/api/event';
 import type { ShellCommand, RendererEvent } from '@heart-star/protocol';
+import type { SemanticArea } from '@heart-star/character-schema';
 import type { RendererHost } from '../host/RendererHost';
 
 /**
@@ -84,8 +85,30 @@ export class IpcBridge {
         this.host.setFrameBudget(cmd.budget.kind === 'paused' ? 'paused' : cmd.budget.value);
         break;
       case 'setGazeTarget':
-        // TODO(M2): 交给 GazeController 平滑后写入 adapter.lookAt
+        this.host.setGazeTarget(cmd.nx, cmd.ny);
         break;
+      case 'tap': {
+        let area: SemanticArea | null = null;
+        try {
+          area = this.host.tap(cmd.x, cmd.y);
+        } catch (e) {
+          // 命中反馈的失败必须能看见：它的表现是"点了没反应"，
+          // 而异常若在这里被吞掉，日志里连一行都不会有 ——
+          // 排查时既不知道收到了点击，也不知道是命中判定炸了。
+          this.emit({
+            type: 'error',
+            message: `命中判定失败（${cmd.x.toFixed(0)},${cmd.y.toFixed(0)}）: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+            fatal: false,
+          });
+        }
+        // 回报命中结果：现在壳层暂时不用（反馈由渲染层自己播），
+        // 但"点了哪"是将来做音效、AI 情绪、摸头/摸手区分的唯一来源，
+        // 不回报的话那部分就只能靠猜。
+        this.emit({ type: 'hitTest', area });
+        break;
+      }
       case 'switchCharacter':
         this.switchCharacter(cmd.characterId);
         break;

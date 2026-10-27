@@ -66,7 +66,16 @@ export type ShellCommand =
   /** 帧预算。'paused' 用于窗口被完全遮挡时。 */
   | { type: 'setFrameBudget'; budget: FrameBudget }
   /** 鼠标归一化坐标（-1..1），供 GazeController 使用 */
-  | { type: 'setGazeTarget'; nx: number; ny: number };
+  | { type: 'setGazeTarget'; nx: number; ny: number }
+  /**
+   * 一次点击，坐标是**宠物窗口客户区的 CSS 像素**（左上角为原点）。
+   *
+   * 命中判定放在渲染层：只有它知道 Live2D 的 drawable / VRM 的射线，
+   * 壳层只知道有个指针按下了。由渲染层自己判完再播对应部位的动作，
+   * 省掉一次"壳问渲染、渲染答、壳再命令渲染"的往返 ——
+   * 那三跳里任何一跳断了都会变成"点了没反应且没有任何日志"。
+   */
+  | { type: 'tap'; x: number; y: number };
 
 // ---------- 渲染 → 壳 ----------
 

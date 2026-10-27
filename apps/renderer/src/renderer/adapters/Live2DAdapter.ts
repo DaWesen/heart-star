@@ -10,7 +10,7 @@ import { ensureCubismCore } from '../../character/cubismCore';
 
 // 只用类型引用，不产生运行时依赖：pixi 与 pixi-live2d-display 都在 load() 里
 // 动态 import，只装 2D 角色的用户不会为 3D 付带宽，反之亦然。
-import type { Application } from 'pixi.js';
+import type { Application, Point } from 'pixi.js';
 import type { Live2DModel } from 'pixi-live2d-display/cubism4';
 
 /**
@@ -39,9 +39,20 @@ interface Live2DInternals {
     getParameterIndex?(id: string): number;
     getParameterMinimumValue?(index: number): number;
     getParameterMaximumValue?(index: number): number;
+    getDrawableCount?(): number;
   };
   hitTest?(x: number, y: number): string[];
-  motionManager?: { definitions?: Record<string, unknown> };
+  /** 语义命中区之外做轮廓兜底用的 drawable 几何（模型画布坐标系）。 */
+  getDrawableIndex?(id: string): number;
+  getDrawableVertices?(index: number): ArrayLike<number>;
+  motionManager?: {
+    definitions?: Record<string, unknown>;
+    /**
+     * 动作状态机。只声明要改的那一个方法 —— 它决定"动作放完要不要自动接 idle"，
+     * 而库默认是"要"，角色因此几乎从不停下来。
+     */
+    state?: { shouldRequestIdleMotion?: () => boolean };
+  };
 }
 
 /** 参数范围读不到时的兜底。眼球/角度类参数常见量级。 */
@@ -124,8 +135,34 @@ export class Live2DAdapter implements CharacterRenderer {
     this.model = model;
     this.manifest = manifest;
 
+    // 必须在模型开始 update 之前关掉：一旦跑起来，库就会在第一帧
+    // 立刻排一个 idle 进去（此时没有任何动作在播）。
+    this.suppressAutoIdle();
+
     const measured = this.measure();
     this.applyBounds(measured.width, measured.height);
+  }
+
+  /**
+   * 关掉库自带的 idle 自动续接。
+   *
+   * 库在 `MotionManager.update()` 里写着：动作一放完，只要当前没有
+   * 待机组（`shouldRequestIdleMotion()`），就**立刻**随机再起一个 idle。
+   * 于是待机动作首尾相接、永不停歇 —— 角色一直在做小动作，
+   * 用户主动点一下触发的反应反而被淹没，看上去像"我做什么它都没反应"。
+   *
+   * 这里把"什么时候放待机"收归上层（渲染宿主按间隔排），
+   * 本类只负责让库别自作主张。
+   *
+   * 关掉之后角色并不会僵住：呼吸、眨眼、物理（头发/衣服摆动）
+   * 在库里都是独立于动作的，没有动作时照常运行。
+   */
+  private suppressAutoIdle(): void {
+    const state = this.internals()?.motionManager?.state;
+    if (!state) return;
+
+    // 覆盖的是原型方法：写成实例属性就能遮蔽它，不动原型（否则会波及所有模型）
+    state.shouldRequestIdleMotion = () => false;
   }
 
   playMotion(req: MotionRequest): void {
@@ -175,11 +212,21 @@ export class Live2DAdapter implements CharacterRenderer {
   }
 
   hitTest(x: number, y: number): SemanticArea | null {
+    const model = this.model;
     const internals = this.internals();
-    if (!internals?.hitTest) return null;
+    if (!model || !internals?.hitTest) return null;
 
-    const hits = internals.hitTest(x, y);
-    if (hits.length === 0) return null;
+    // 契约给的是画布（世界）坐标，而 internalModel.hitTest 要的是
+    // "原始模型画布"坐标 —— 模型被缩放平移过，两套坐标差着一整个变换。
+    // 少这一步转换的后果是**永远命中不到**，而且没有任何报错可循。
+    // （库里的 Live2DModel.hitTest 就是先 toModelPosition 再转交 internalModel，
+    //  这里绕开它是因为要拿 drawable 名翻语义部位，而不是只要命中区域名。）
+    //
+    // 第二个参数必须**显式传**：它的默认值是 `position.clone()`，
+    // 而这里传的是普通对象（没有 clone 方法），走默认值就是一次 TypeError。
+    // 付出的代价是两个入参都得断言成 Point —— 只为不引入 pixi 的运行时依赖。
+    const local = model.toModelPosition({ x, y } as Point, { x: 0, y: 0 } as Point);
+    const hits = internals.hitTest(local.x, local.y);
 
     // 命中的是模型内部的 drawable 名，翻回语义部位。
     // 只看 drawable 型：Cubism 的命中区域就是 drawable，
@@ -187,7 +234,77 @@ export class Live2DAdapter implements CharacterRenderer {
     for (const [area, def] of Object.entries(this.manifest?.hitAreas ?? {})) {
       if (def.type === 'drawable' && hits.includes(def.target)) return area as SemanticArea;
     }
-    return null;
+
+    return this.fallbackArea(internals, local.x, local.y);
+  }
+
+  /**
+   * 语义命中区没盖住时的兜底。
+   *
+   * 语义命中区是美术在模型里手标的一小块 drawable（日和只有胸口一块），
+   * 盖不住头发、裙摆、腿这些大面积部位 —— 而命中判定随动作摆动还会漂移。
+   * 点在角色身上却毫无反应，用户只会把点击当成坏的；
+   * 比起"部位判错"，"摸到了却没反应"严重得多。
+   *
+   * 所以只要点落在模型的多边形轮廓里，就按"摸到了"处理，
+   * 部位取**离点击最近的标注区**：只有一个标注区时必然选中它，
+   * 有多个时也大概率符合直觉。点在角色轮廓之外（窗口空白处）仍返回 null。
+   */
+  private fallbackArea(internals: Live2DInternals, x: number, y: number): SemanticArea | null {
+    const areas = Object.entries(this.manifest?.hitAreas ?? {}).filter(
+      ([, def]) => def.type === 'drawable',
+    );
+    if (areas.length === 0) return null;
+    if (!this.hitsSilhouette(internals, x, y)) return null;
+
+    let best: SemanticArea | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (const [area, def] of areas) {
+      if (def.type !== 'drawable') continue;
+      const bounds = this.drawableBounds(internals, def.target);
+      if (!bounds) continue;
+      const d = distanceToRect(x, y, bounds);
+      if (d < bestDist) {
+        bestDist = d;
+        best = area as SemanticArea;
+      }
+    }
+    return best;
+  }
+
+  /** 点是否落在模型的任一 drawable 多边形里（≈ 点在角色身上）。 */
+  private hitsSilhouette(internals: Live2DInternals, x: number, y: number): boolean {
+    const verticesOf = internals.getDrawableVertices;
+    const count = internals.coreModel?.getDrawableCount?.() ?? 0;
+    if (!verticesOf || count <= 0) return false;
+
+    for (let i = 0; i < count; i += 1) {
+      const v = verticesOf.call(internals, i);
+      if (v && pointInPolygon(x, y, v)) return true;
+    }
+    return false;
+  }
+
+  /** 单个 drawable（按 id）在模型画布坐标系里的包围盒。 */
+  private drawableBounds(
+    internals: Live2DInternals,
+    id: string,
+  ): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    const index = internals.getDrawableIndex?.(id);
+    const v = index !== undefined && index >= 0 ? internals.getDrawableVertices?.(index) : null;
+    if (!v || v.length < 2) return null;
+
+    let minX = v[0] as number;
+    let maxX = minX;
+    let minY = v[1] as number;
+    let maxY = minY;
+    for (let i = 2; i < v.length; i += 2) {
+      minX = Math.min(minX, v[i] as number);
+      maxX = Math.max(maxX, v[i] as number);
+      minY = Math.min(minY, v[i + 1] as number);
+      maxY = Math.max(maxY, v[i + 1] as number);
+    }
+    return { minX, minY, maxX, maxY };
   }
 
   setBounds(width: number, height: number): void {
@@ -343,3 +460,30 @@ const clampSigned = (v: number): number => (v < -1 ? -1 : v > 1 ? 1 : v);
 
 /** 组名比对用的归一化：忽略大小写与 @ _ - 这类分隔符差异 */
 const normalize = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/** 点是否在多边形内（奇偶规则）。顶点形如 [x0, y0, x1, y1, …]。 */
+const pointInPolygon = (x: number, y: number, v: ArrayLike<number>): boolean => {
+  const n = v.length >> 1;
+  let inside = false;
+  for (let i = 0, j = n - 1; i < n; j = i) {
+    const xi = v[i * 2] as number;
+    const yi = v[i * 2 + 1] as number;
+    const xj = v[j * 2] as number;
+    const yj = v[j * 2 + 1] as number;
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+};
+
+/** 点到矩形的最短距离（点在矩形内时为 0）。 */
+const distanceToRect = (
+  x: number,
+  y: number,
+  r: { minX: number; minY: number; maxX: number; maxY: number },
+): number => {
+  const dx = Math.max(r.minX - x, 0, x - r.maxX);
+  const dy = Math.max(r.minY - y, 0, y - r.maxY);
+  return Math.hypot(dx, dy);
+};

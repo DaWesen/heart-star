@@ -1,9 +1,39 @@
-import type { CharacterManifest, RendererCapabilities } from '@heart-star/character-schema';
+import type {
+  CharacterManifest,
+  RendererCapabilities,
+  SemanticArea,
+} from '@heart-star/character-schema';
 import type { PetForm } from '@heart-star/protocol';
 import { loadManifest } from '../character/manifest';
 import { CHARACTER_SCALE } from '@heart-star/protocol';
 import type { CharacterRenderer } from '../renderer/CharacterRenderer';
 import { createAdapter } from '../renderer/adapters';
+import { GazeController } from './GazeController';
+
+/** 点击反馈的动作优先级。高于 idle，低于 AI 主动发起的动作。 */
+const TAP_PRIORITY = 2;
+
+/** 待机动作优先级。最低 —— 任何主动交互都能盖过它。 */
+const IDLE_PRIORITY = 1;
+
+/**
+ * 两次待机动作之间的间隔（秒），在这个区间里随机取值。
+ *
+ * 定成十几秒量级是刻意的：待机小动作的意义是"它活着"，
+ * 而不是"它一直在表演"。连成一片之后，用户主动点一下的反应
+ * 就淹没在里面了 —— 看上去像点了没反应。
+ */
+const IDLE_GAP_MIN_SEC = 12;
+const IDLE_GAP_MAX_SEC = 24;
+
+/**
+ * 换角后第一次待机的间隔（秒）。
+ *
+ * 比常规间隔短得多：刚切过来的角色如果一二十秒纹丝不动，
+ * 第一眼会被误判成"卡住了 / 没加载出来"。
+ */
+const IDLE_FIRST_GAP_MIN_SEC = 3;
+const IDLE_FIRST_GAP_MAX_SEC = 7;
 import { FrameScheduler, type FrameRate } from './FrameScheduler';
 
 /**
@@ -44,6 +74,24 @@ export class RendererHost {
   private characterId: string | null = null;
 
   /**
+   * 视线平滑器。
+   *
+   * 放在宿主而不是 adapter 上：换角色不该让视线"归零重来"，
+   * 而 adapter 是随角色一起换掉的。
+   */
+  private readonly gaze = new GazeController();
+
+  /**
+   * 待机动作排程器。
+   *
+   * 库（Live2D）的默认行为是"动作放完立刻接下一个待机"，角色几乎
+   * 永不停歇。本类接管这件事：待机是**间隔**发生的，中间留出静止，
+   * 让用户主动交互的动作能被看见。
+   */
+  private idleElapsed = 0;
+  private idleGap = randomBetween(IDLE_FIRST_GAP_MIN_SEC, IDLE_FIRST_GAP_MAX_SEC);
+
+  /**
    * 帧统计回调，由 IpcBridge 注入。
    * 放在宿主上而不是调度器上，是为了让"上报"这件事留在 IPC 层，
    * 渲染宿主自身不感知壳层。
@@ -79,6 +127,10 @@ export class RendererHost {
     this.renderer = next;
     this.capabilities = next.capabilities;
     this.characterId = manifest.id;
+
+    // 新角色从头开始排：旧角色的进度留着没有意义，
+    // 而且可能刚好在换上的一瞬间就甩出一个待机动作
+    this.resetIdle(IDLE_FIRST_GAP_MIN_SEC, IDLE_FIRST_GAP_MAX_SEC);
   }
 
   /** 当前角色 id。角色切换完成前为 null。 */
@@ -131,6 +183,35 @@ export class RendererHost {
     this.renderer?.setBounds(width, height);
   }
 
+  /** 视线目标（-1..1）。由壳层按指针位置下发，渲染层不认屏幕坐标。 */
+  setGazeTarget(nx: number, ny: number): void {
+    this.gaze.setTarget(nx, ny);
+  }
+
+  /**
+   * 一次点击（客户区 CSS 像素）。
+   *
+   * 命中判定在这里做：只有渲染层知道模型的形状。
+   * 命中了就播对应部位的动作（语义组名 `tap_<部位>`，如 tap_body），
+   * 没命中就什么都不做 —— 点在空白处本来就不该有反应。
+   *
+   * @returns 命中的语义部位，未命中返回 null
+   */
+  tap(x: number, y: number): SemanticArea | null {
+    const renderer = this.renderer;
+    if (!renderer) return null;
+
+    const area = renderer.hitTest(x, y);
+    if (area) {
+      renderer.playMotion({ group: `tap_${area}`, priority: TAP_PRIORITY });
+
+      // 交互刚发生就把待机往后推：否则被摸的反应可能刚播到一半
+      // 就被下一个待机动作接上，"我点它才有反应"这件事就白做了
+      this.resetIdle();
+    }
+    return area;
+  }
+
   /**
    * 设置用户缩放倍率。
    *
@@ -157,6 +238,45 @@ export class RendererHost {
   }
 
   private tick(dt: number): void {
-    this.renderer?.render(dt);
+    const renderer = this.renderer;
+    if (!renderer) return;
+
+    this.pumpIdle(dt, renderer);
+
+    // 视线按帧推进，而不是收到消息就写：消息是 30Hz 的离散输入，
+    // 逐条直接写会让眼睛跳动
+    const gaze = this.gaze.update(dt);
+    renderer.lookAt(gaze.x, gaze.y);
+    renderer.render(dt);
+  }
+
+  /**
+   * 按间隔排一次待机动作。
+   *
+   * 间隔从"上一次排程"起算，而不是从"动作播完"起算：
+   * 动作时长随角色和文件变，去追问它会把这份逻辑绑死在具体模型上。
+   * 撞上还在播的动作也不要紧 —— idle 优先级最低，库会直接拒绝这次请求
+   * （详见 Live2DAdapter.suppressAutoIdle 引用的那段库代码），
+   * 结果只是"少播一次"，不会出现两个动作打架。
+   */
+  private pumpIdle(dt: number, renderer: CharacterRenderer): void {
+    this.idleElapsed += dt;
+    if (this.idleElapsed < this.idleGap) return;
+
+    renderer.playMotion({ group: 'idle', priority: IDLE_PRIORITY });
+    this.resetIdle();
+  }
+
+  /** 重新抽一次待机间隔。不传参数时用常规区间。 */
+  private resetIdle(
+    min = IDLE_GAP_MIN_SEC,
+    max = IDLE_GAP_MAX_SEC,
+  ): void {
+    this.idleElapsed = 0;
+    // 固定间隔会让人看出节拍，随机一下才像"它自己想动一下"
+    this.idleGap = randomBetween(min, max);
   }
 }
+
+const randomBetween = (min: number, max: number): number =>
+  min + Math.random() * (max - min);

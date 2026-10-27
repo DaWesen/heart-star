@@ -84,6 +84,8 @@ pub fn run() {
             // 监听渲染层事件，并接管帧预算（空闲降帧）
             ipc::bind(&pet);
             ipc::spawn_frame_budget_governor(pet.clone(), frame_profile.clone());
+            ipc::spawn_gaze_pump(pet.clone());
+            ipc::spawn_tap_pump(pet.clone());
 
             // 宠物窗口落位诊断。桌宠没有窗口边框也没有任务栏入口，
             // "看不见宠物"时最需要的信息就是它到底在哪、多大、可见与否。
@@ -156,7 +158,7 @@ fn spawn_panel_bootstrap(app: AppHandle) {
             Ok(panel) => {
                 intercept_panel_close(&panel);
                 ipc::panel::bind(&panel);
-                log!("面板窗口已就绪（双击宠物或托盘 → 打开面板）");
+                log!("面板窗口已就绪（托盘菜单 → 打开面板）");
             }
             Err(e) => log_warn!("面板窗口创建失败: {e}"),
         });
@@ -233,7 +235,7 @@ struct SyncedState {
 /// 三个职责，都是"低频轮询 + 走状态机"，绝不在别处直接调 SetParent：
 ///  1. 宿主是否还活着 —— 宿主是外部窗口，销毁不会通知我们，只能轮询。
 ///     漏掉这个检测，宠物会永远卡在面板形态里叫不回来。
-///  2. 双击宠物触发的切换请求（钩子置位，这里判定、主线程执行）。
+///  2. 托盘菜单触发的切换请求（钩子置位，这里判定、主线程执行）。
 ///  3. 把形态与缩放同步给渲染层。
 ///
 /// 本线程只**判定**，不碰窗口：真正的窗口操作由 `dispatch_window_work` 派给主线程。
@@ -277,7 +279,7 @@ static WINDOW_WORK_BUSY: AtomicBool = AtomicBool::new(false);
 /// **为什么必须派回主线程**：Win32 窗口属于创建它的线程，形态切换还要装/卸
 /// `WH_MOUSE_LL` 钩子，而低层钩子只在"安装它的那个线程取消息时"才会回调。
 /// 监管线程没有消息循环，在这里装钩子等于把钩子彻底闷死 ——
-/// 表现为切回桌面之后宠物既不响应双击、连穿透都不会再摘掉，
+/// 表现为切回桌面之后宠物既不响应点击、连穿透都不会再摘掉，
 /// 而且日志毫无痕迹，只能靠"宠物突然变砖"才发现。
 fn dispatch_window_work(app: &AppHandle) {
     let Ok(work) = judged_work(app) else {
@@ -320,7 +322,7 @@ fn judged_work(app: &AppHandle) -> Result<WindowWork, ()> {
         match pet.form() {
             Form::Desktop => Ok(WindowWork::ToPanel),
             Form::Panel(_) => Ok(WindowWork::ToDesktop),
-            // 切换进行中：丢弃这次请求，下一次双击会重新触发
+            // 切换进行中：丢弃这次请求，下一次点菜单会重新触发
             Form::Transitioning => Err(()),
         }
     } else {
@@ -360,7 +362,7 @@ fn run_window_work(app: &AppHandle, work: WindowWork) {
                 Some(pet.to_panel(host, area))
             }
             // 面板还在后台准备（第二个 WebView2 初始化 + dev 下等 vite）。
-            // 这一轮做不到，直接告知用户 —— 静默丢弃会让人以为双击没生效。
+            // 这一轮做不到，直接告知用户 —— 静默丢弃会让人以为菜单点了没反应。
             None => {
                 log_warn!("面板尚未就绪，本次切换请求已丢弃");
                 None
@@ -415,7 +417,7 @@ fn panel_hwnd(app: &AppHandle) -> Option<HWND> {
     app.get_webview_window(PANEL_LABEL)?.hwnd().ok()
 }
 
-/// 显示面板。入口有两个：双击宠物，或托盘菜单。
+/// 显示面板。入口有两类：托盘菜单，或形态切换时顺带显示。
 pub(crate) fn show_panel(app: &AppHandle) {
     let Some(panel) = app.get_webview_window(PANEL_LABEL) else {
         return;

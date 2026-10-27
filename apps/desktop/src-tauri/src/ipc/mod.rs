@@ -100,8 +100,17 @@ fn handle(window: &WebviewWindow, evt: RendererEvent) {
             );
             handshake(window);
         }
-        // M2：命中结果决定"摸头/摸手"反馈，壳层暂不需要
-        RendererEvent::HitTest { .. } => {}
+        RendererEvent::HitTest { area } => {
+            // 反馈本身由渲染层播（它才知道动作组），壳层只留痕。
+            //
+            // 必须留这条：命中反馈失效的表现是"点了没反应" ——
+            // 不报错、画面不变，没有这一行就分不清是"点击没送到"
+            // 还是"送到了但没命中"，而这两者的排查方向完全相反。
+            match area {
+                Some(a) => log!("点击命中 -> {a:?}"),
+                None => log!("点击未命中"),
+            }
+        }
         RendererEvent::FrameStats { fps, frame_ms } => {
             log!("渲染 {fps:.1}fps / {frame_ms:.2}ms");
         }
@@ -234,4 +243,128 @@ pub fn spawn_frame_budget_governor(window: WebviewWindow, profile: Arc<Mutex<Fra
             sent = Some(want);
         }
     });
+}
+
+/// 视线跟随的刷新间隔（~30Hz）。
+///
+/// 指针每秒能产生上百条消息，逐条转发等于把鼠标消息洪流灌进 IPC。
+/// 30Hz 已经超过眼睛能察觉的更新速度，再快的差别用户也看不出来。
+const GAZE_INTERVAL_MS: u64 = 33;
+
+/// 指针离窗口中心多远时视线打满 —— 单位是"宠物窗口的尺寸"。
+///
+/// 1.5 是手感值：指针在宠物自己身上时只有 1/3 不到的偏转（像是"余光注意到"），
+/// 挪开一两个身位才看满。取更小的值（比如半个身位）会让视线几乎恒定打满 ——
+/// 宠物永远斜眼盯着屏幕边缘，那不是跟随，是抽筋。
+const GAZE_FULL_DEFLECTION: f64 = 1.5;
+
+/// 小于这个变化就不下发。指针微动不该产生 IPC。
+const GAZE_EPSILON: f64 = 0.01;
+
+/// 视线跟随：把指针位置换算成 -1..1 的视线方向下发给渲染层。
+///
+/// 同样走独立线程而不是钩子回调（理由见帧预算策略）：钩子在全局鼠标
+/// 消息路径上，里面只许留两个原子写。
+pub fn spawn_gaze_pump(window: WebviewWindow) {
+    std::thread::spawn(move || {
+        let mut sent: Option<(f64, f64)> = None;
+        // 只在"有没有指针来源"翻转时打日志：视线不动的表现很隐蔽，
+        // 而逐帧打日志本身就会成为性能问题
+        let mut tracking = None;
+
+        loop {
+            std::thread::sleep(Duration::from_millis(GAZE_INTERVAL_MS));
+
+            let want = match hook::cursor() {
+                Some((x, y)) => match gaze_from_cursor(&window, x, y) {
+                    Some(value) => value,
+                    None => continue,
+                },
+                // 钩子未安装（面板形态）：没有指针来源，视线归正
+                None => (0.0, 0.0),
+            };
+
+            let has_source = hook::cursor().is_some();
+            if tracking != Some(has_source) {
+                log!(
+                    "视线跟随 -> {}",
+                    if has_source {
+                        "开（桌面形态）"
+                    } else {
+                        "暂停（面板形态无指针来源）"
+                    }
+                );
+                tracking = Some(has_source);
+            }
+
+            if sent.is_some_and(|(px, py)| {
+                (px - want.0).abs() < GAZE_EPSILON && (py - want.1).abs() < GAZE_EPSILON
+            }) {
+                continue;
+            }
+
+            if let Err(e) = send(
+                &window,
+                &ShellCommand::SetGazeTarget {
+                    nx: want.0,
+                    ny: want.1,
+                },
+            ) {
+                log_warn!("视线下发失败: {e}");
+                continue;
+            }
+            sent = Some(want);
+        }
+    });
+}
+
+/// 点击转发：把钩子记下的按下位置换算成客户区 CSS 坐标下发给渲染层。
+///
+/// 阻塞在 channel 上而不是轮询 —— 点击是稀疏事件，
+/// 为它定时唤醒线程既没意义又会白白占用一个 CPU 时间片。
+pub fn spawn_tap_pump(window: WebviewWindow) {
+    let rx = hook::take_tap_receiver();
+    std::thread::spawn(move || {
+        for (x, y) in rx {
+            match css_point(&window, x, y) {
+                Some((cx, cy)) => {
+                    if let Err(e) = send(&window, &ShellCommand::Tap { x: cx, y: cy }) {
+                        log_warn!("点击下发失败: {e}");
+                    }
+                }
+                // 拿不到窗口几何（窗口刚创建/被藏起）时丢掉这次点击：
+                // 补发一个"过期的点击"只会让宠物在错误的位置上作出反应
+                None => log_warn!("点击坐标换算失败，本次忽略"),
+            }
+        }
+    });
+}
+
+/// 屏幕物理像素 → 宠物窗口客户区的 CSS 像素。
+fn css_point(window: &WebviewWindow, x: i32, y: i32) -> Option<(f64, f64)> {
+    let pos = window.outer_position().ok()?;
+    let scale = window.scale_factor().ok()?;
+    if scale <= 0.0 {
+        return None;
+    }
+    // outer_position 给的是物理像素，渲染层要的是 CSS 像素：
+    // 差一个 DPI 倍率的话，点的位置在 150% 缩放下会整体偏出去
+    Some(((x - pos.x) as f64 / scale, (y - pos.y) as f64 / scale))
+}
+
+/// 指针（屏幕物理像素）相对宠物窗口中心的方向，归一化到 -1..1。
+fn gaze_from_cursor(window: &WebviewWindow, x: i32, y: i32) -> Option<(f64, f64)> {
+    let size = window.inner_size().ok()?;
+    let pos = window.outer_position().ok()?;
+    // 尺寸为 0（窗口刚创建/被藏起来）时下发的会是 NaN 或无穷，
+    // 那会一路污染到模型的参数里
+    if size.width == 0 || size.height == 0 {
+        return None;
+    }
+
+    let cx = pos.x as f64 + size.width as f64 / 2.0;
+    let cy = pos.y as f64 + size.height as f64 / 2.0;
+    let nx = ((x as f64 - cx) / (size.width as f64 * GAZE_FULL_DEFLECTION)).clamp(-1.0, 1.0);
+    let ny = ((y as f64 - cy) / (size.height as f64 * GAZE_FULL_DEFLECTION)).clamp(-1.0, 1.0);
+    Some((nx, ny))
 }

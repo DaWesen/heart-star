@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Listener, Manager, WebviewWindow};
@@ -20,6 +21,7 @@ use super::generated::{
 use super::{send, ShellCommand, PET_LABEL};
 use crate::lifecycle::{auto_launch_enabled, set_auto_launch};
 use crate::logging::{log, log_warn};
+use crate::settings::{self, FrameProfile};
 
 /// 壳 → 面板：下发一条命令。全局广播 —— 面板可能还没建出来，那时自然无人接收。
 pub fn send_panel(app: &AppHandle, cmd: &PanelCommand) -> Result<(), tauri::Error> {
@@ -61,6 +63,7 @@ fn handle_event(app: &AppHandle, evt: PanelEvent) {
             log!("面板已就绪");
             send_character_list(app);
             send_autostart_state(app);
+            send_frame_profile(app);
         }
         PanelEvent::SwitchCharacter { character_id } => {
             let Some(pet) = app.get_webview_window(PET_LABEL) else {
@@ -93,6 +96,71 @@ fn handle_event(app: &AppHandle, evt: PanelEvent) {
             // 写失败时面板上的勾选框会被拨回去，用户看到的始终是真实状态
             send_autostart_state(app);
         }
+        PanelEvent::SetFrameProfile {
+            active_fps,
+            idle_fps,
+        } => {
+            apply_frame_profile(app, active_fps, idle_fps);
+        }
+    }
+}
+
+/// 写入帧率档位并回显夹紧后的结果。
+///
+/// 两个来源：面板（用户拖动滑块）。下发回显而不是让面板自己记，
+/// 是为了让"实际在跑多少帧"只有一个真相 —— 面板显示 60 却跑 30 的
+/// 投诉最难查，因为它两边看起来都没错。
+fn apply_frame_profile(app: &AppHandle, active_fps: f64, idle_fps: f64) {
+    let profile = FrameProfile {
+        active_fps,
+        idle_fps,
+    }
+    .clamp();
+
+    let Some(state) = app.try_state::<Arc<Mutex<FrameProfile>>>() else {
+        log_warn!("帧率档位状态未挂载，忽略本次设置");
+        return;
+    };
+
+    match state.lock() {
+        Ok(mut current) => *current = profile,
+        Err(e) => {
+            log_warn!("帧率档位加锁失败: {e}");
+            return;
+        }
+    }
+
+    settings::save(app, &profile);
+    log!(
+        "帧率档位 -> 交互 {:.0}fps / 空闲 {:.0}fps",
+        profile.active_fps,
+        profile.idle_fps
+    );
+    send_frame_profile(app);
+}
+
+/// 下发当前帧率档位。
+pub fn send_frame_profile(app: &AppHandle) {
+    let Some(state) = app.try_state::<Arc<Mutex<FrameProfile>>>() else {
+        log_warn!("帧率档位状态未挂载，无法下发");
+        return;
+    };
+    let profile = match state.lock() {
+        Ok(p) => *p,
+        Err(e) => {
+            log_warn!("帧率档位加锁失败: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = send_panel(
+        app,
+        &PanelCommand::FrameProfileChanged {
+            active_fps: profile.active_fps,
+            idle_fps: profile.idle_fps,
+        },
+    ) {
+        log_warn!("帧率档位下发失败: {e}");
     }
 }
 

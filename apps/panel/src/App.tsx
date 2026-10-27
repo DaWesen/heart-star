@@ -13,8 +13,8 @@
  * 本窗口默认隐藏，由壳层在双击宠物时显示；关闭时壳层拦截并改为隐藏（不销毁）。
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { CHARACTER_SCALE, type CharacterSummary } from '@heart-star/protocol';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { CHARACTER_SCALE, FRAME_PROFILE, type CharacterSummary } from '@heart-star/protocol';
 import { bindPanelIpc, sendPanelEvent } from './ipc';
 
 const ABOUT = {
@@ -130,7 +130,78 @@ const buttonActive: React.CSSProperties = {
  * 拖动滑块时每帧都会触发一次 change。
  * 不做节流的话一次拖拽就是上百条 IPC，全砸在通道上。
  */
-const SCALE_THROTTLE_MS = 50;
+const THROTTLE_MS = 50;
+
+/**
+ * 尾随节流：窗口内的多次调用只在结尾发一次。
+ *
+ * 用 ref 而不是 state 保存句柄与待发动作，是为了不让节流本身触发额外渲染。
+ * 卸载时清定时器 —— 否则最后一条消息可能打在一个已经销毁的订阅上。
+ */
+function useThrottle(delayMs: number) {
+  const timer = useRef<number | null>(null);
+  const pending = useRef<(() => void) | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  return useCallback(
+    (action: () => void) => {
+      pending.current = action;
+      if (timer.current !== null) return;
+
+      timer.current = window.setTimeout(() => {
+        timer.current = null;
+        const next = pending.current;
+        pending.current = null;
+        next?.();
+      }, delayMs);
+    },
+    [delayMs],
+  );
+}
+
+/** 一行"标签 + 数值 + 滑块"。面板里三处滑块共用，样式与回显口径必须一致。 */
+function SliderRow({
+  label,
+  readout,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string;
+  readout: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+        <span>{label}</span>
+        <span style={{ opacity: 0.6 }}>{readout}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        // 本地先更新再节流下发：拖动过程要跟手，等 IPC 往返再更新的话手感是黏的
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ width: '100%', accentColor: '#ff8fb1' }}
+      />
+    </div>
+  );
+}
 
 /**
  * 角色切换与缩放。
@@ -144,17 +215,7 @@ function CharacterPicker() {
   const [error, setError] = useState<string | null>(null);
   const [scale, setScale] = useState<number>(CHARACTER_SCALE.default);
 
-  // 节流用的两个 ref：定时器句柄 + 最后一次待发的值。
-  // 用 ref 而不是 state，是为了不因节流状态变化触发额外渲染。
-  const timer = useRef<number | null>(null);
-  const pending = useRef<number | null>(null);
-
-  useEffect(
-    () => () => {
-      if (timer.current !== null) window.clearTimeout(timer.current);
-    },
-    [],
-  );
+  const throttle = useThrottle(THROTTLE_MS);
 
   useEffect(() => {
     return bindPanelIpc((cmd) => {
@@ -181,18 +242,9 @@ function CharacterPicker() {
     });
   }, []);
 
-  const pushScale = (value: number) => {
-    pending.current = value;
-    if (timer.current !== null) return;
-
-    timer.current = window.setTimeout(() => {
-      timer.current = null;
-      const next = pending.current;
-      pending.current = null;
-      if (next !== null) {
-        sendPanelEvent({ type: 'setCharacterScale', scale: next });
-      }
-    }, SCALE_THROTTLE_MS);
+  const changeScale = (value: number) => {
+    setScale(value);
+    throttle(() => sendPanelEvent({ type: 'setCharacterScale', scale: value }));
   };
 
   return (
@@ -218,24 +270,14 @@ function CharacterPicker() {
       )}
 
       <div style={{ marginTop: 14, borderTop: '1px solid #e6ebf2', paddingTop: 10 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-          <span>角色大小</span>
-          <span style={{ opacity: 0.6 }}>{Math.round(scale * 100)}%</span>
-        </div>
-        <input
-          type="range"
+        <SliderRow
+          label="角色大小"
+          readout={`${Math.round(scale * 100)}%`}
+          value={scale}
           min={CHARACTER_SCALE.min}
           max={CHARACTER_SCALE.max}
           step={CHARACTER_SCALE.step}
-          value={scale}
-          // 本地先更新再节流下发：拖动过程要跟手，
-          // 等 IPC 往返再更新的话手感是黏的
-          onChange={(e) => {
-            const next = Number(e.target.value);
-            setScale(next);
-            pushScale(next);
-          }}
-          style={{ width: '100%', accentColor: '#ff8fb1' }}
+          onChange={changeScale}
         />
       </div>
     </div>
@@ -290,6 +332,77 @@ function AutostartToggle() {
 }
 
 /**
+ * 帧率档位。
+ *
+ * 两档的含义：有交互时跑 `active` 帧，空闲 30 秒后降到 `idle` 帧。
+ * 桌宠常驻桌面，这档数的取舍（要丝滑还是省电）只有用户自己知道。
+ *
+ * 两个值一起下发：它们是一组配置，分开发的话中间会出现"活跃档已变、
+ * 空闲档还没变"的过渡态，而那个中间态没有任何意义。
+ */
+function FrameSliders() {
+  const [active, setActive] = useState<number>(FRAME_PROFILE.active.default);
+  const [idle, setIdle] = useState<number>(FRAME_PROFILE.idle.default);
+  const throttle = useThrottle(THROTTLE_MS);
+
+  // 下发时要读的是"此刻"的两个值：闭包里直接引用 state 的话，
+  // 节流窗口到期时发的是触发那一次的旧快照。
+  const latest = useRef({ active, idle });
+  latest.current = { active, idle };
+
+  useEffect(() => {
+    return bindPanelIpc((cmd) => {
+      switch (cmd.type) {
+        case 'frameProfileChanged':
+          // 回显是壳层夹紧后的结果：空闲档不允许高于活跃档，
+          // 用户拖出来越界的组合会被压回合法区间，这里跟着更新
+          setActive(cmd.activeFps);
+          setIdle(cmd.idleFps);
+          break;
+      }
+    });
+  }, []);
+
+  const change = (next: { active?: number; idle?: number }) => {
+    if (next.active !== undefined) setActive(next.active);
+    if (next.idle !== undefined) setIdle(next.idle);
+    throttle(() => {
+      const value = latest.current;
+      sendPanelEvent({
+        type: 'setFrameProfile',
+        activeFps: value.active,
+        idleFps: value.idle,
+      });
+    });
+  };
+
+  return (
+    <div style={{ marginTop: 14, borderTop: '1px solid #e6ebf2', paddingTop: 10 }}>
+      <SliderRow
+        label={`交互时帧率（${FRAME_PROFILE.idleAfterSecs} 秒内）`}
+        readout={`${Math.round(active)} fps`}
+        value={active}
+        min={FRAME_PROFILE.active.min}
+        max={FRAME_PROFILE.active.max}
+        step={FRAME_PROFILE.active.step}
+        onChange={(v) => change({ active: v })}
+      />
+      <div style={{ marginTop: 8 }}>
+        <SliderRow
+          label={`空闲 ${FRAME_PROFILE.idleAfterSecs} 秒后`}
+          readout={`${Math.round(idle)} fps`}
+          value={idle}
+          min={FRAME_PROFILE.idle.min}
+          max={FRAME_PROFILE.idle.max}
+          step={FRAME_PROFILE.idle.step}
+          onChange={(v) => change({ idle: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
  * 关于页 —— 署名展示的产品侧落地。
  *
  * 代码分发时的署名靠 LICENSE 里的 `Required Notice:` 行（许可证强制义务）；
@@ -322,6 +435,7 @@ export function App() {
 
       <div style={panelRight}>
         <CharacterPicker />
+        <FrameSliders />
         <AutostartToggle />
         {/* TODO(M3)：人设 / 语音 / 快捷键 */}
       </div>

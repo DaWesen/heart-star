@@ -4,6 +4,7 @@
 //! 禁止：感知角色种类、渲染实现、AI 逻辑。
 
 mod logging;
+mod settings;
 
 pub mod ipc;
 pub mod lifecycle;
@@ -11,7 +12,7 @@ pub mod window;
 
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -69,9 +70,20 @@ pub fn run() {
             }
             log!("DPI 缩放 {:.0}%", pet_window.renderer_scale() * 100.0);
 
+            // 帧率档位：从磁盘读出上一次用户的取舍，挂成共享状态。
+            // 面板改档位时改的是同一份，监管线程每秒读它，所以改动一秒内生效。
+            let initial = settings::load(app.handle());
+            log!(
+                "帧率档位：交互 {:.0}fps / 空闲 {:.0}fps",
+                initial.active_fps,
+                initial.idle_fps
+            );
+            let frame_profile = Arc::new(Mutex::new(initial));
+            app.manage(frame_profile.clone());
+
             // 监听渲染层事件，并接管帧预算（空闲降帧）
             ipc::bind(&pet);
-            ipc::spawn_frame_budget_governor(pet.clone());
+            ipc::spawn_frame_budget_governor(pet.clone(), frame_profile.clone());
 
             // 宠物窗口落位诊断。桌宠没有窗口边框也没有任务栏入口，
             // "看不见宠物"时最需要的信息就是它到底在哪、多大、可见与否。
@@ -416,6 +428,8 @@ pub(crate) fn show_panel(app: &AppHandle) {
     // 开机自启同理 —— 而且它的真相在注册表里，用户可以在系统设置里改，
     // 每次都重读一次才能跟上外部改动
     ipc::panel::send_autostart_state(app);
+    // 帧率档位同理：面板页面重载后滑块要能拿回当前正在跑的两个值
+    ipc::panel::send_frame_profile(app);
 }
 
 /// 把宠物摆到宿主客户区中央。

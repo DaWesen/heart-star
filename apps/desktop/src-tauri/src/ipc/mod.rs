@@ -10,11 +10,13 @@
 pub mod generated;
 pub mod panel;
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{Emitter, Listener, Manager, WebviewWindow};
 
 use crate::logging::{log, log_warn};
+use crate::settings::FrameProfile;
 use crate::window::{self, hook};
 
 pub use generated::{
@@ -22,18 +24,17 @@ pub use generated::{
     SemanticArea, ShellCommand, CHANNEL_RENDERER_EVENT, CHANNEL_SHELL_COMMAND,
 };
 
-/// 帧预算档位。桌宠绝大多数时间处于空闲，呼吸这类慢动作 15fps 完全够用，
-/// 按 60fps 空转只是在烧用户的电。
 /// 宠物窗口 / 面板窗口的 label。
 /// 散落的字符串字面量拼错时不会报错，只会"静默找不到窗口"，所以收成常量。
 pub const PET_LABEL: &str = "pet";
 pub const PANEL_LABEL: &str = "panel";
 
-pub const ACTIVE_FPS: f64 = 60.0;
-pub const IDLE_FPS: f64 = 15.0;
-
 /// 无交互多久算空闲。钩子只在指针**进入**宠物区域时打时间戳，
 /// 悬停期间的持续移动不刷新 —— 否则"盯着宠物看"会被误判成一直活跃。
+///
+/// 降帧的理由：桌宠绝大多数时间处于空闲，呼吸这类慢动作很低帧率就够，
+/// 按满帧空转只是在烧用户的电。具体降到多少、活跃时跑多少，
+/// 由用户在面板里定，见 `settings::FrameProfile`。
 pub const IDLE_AFTER_SECS: u64 = 30;
 
 fn now_secs() -> u64 {
@@ -198,17 +199,32 @@ pub fn set_frame_budget(window: &WebviewWindow, budget: FrameBudget) {
 ///
 /// 单独起低频线程轮询而不是挂在鼠标钩子上：钩子位于全局鼠标消息路径上，
 /// 在里面做任何重活都会拖慢整个系统的鼠标响应。这里每秒一次，开销可忽略。
-pub fn spawn_frame_budget_governor(window: WebviewWindow) {
+///
+/// 两个档位从 `profile` 里逐秒重读而不是启动时读一次：
+/// 用户在面板里改了之后，下一秒内就该生效 —— 等到下次重启才生效的
+/// 设置会被当成"改了没用"。
+pub fn spawn_frame_budget_governor(window: WebviewWindow, profile: Arc<Mutex<FrameProfile>>) {
     std::thread::spawn(move || {
         let mut sent: Option<f64> = None;
         loop {
             std::thread::sleep(Duration::from_secs(1));
 
+            let (active, idle) = match profile.lock() {
+                Ok(p) => (p.active_fps, p.idle_fps),
+                // 锁中毒说明有别的线程在改档位时 panic 了，那一份数据不可信 ——
+                // 退回默认档继续跑，总比停在某个未知帧率上强
+                Err(e) => {
+                    log_warn!("帧率档位读取失败，本轮用默认档: {e}");
+                    let d = FrameProfile::default_profile();
+                    (d.active_fps, d.idle_fps)
+                }
+            };
+
             let idle_for = now_secs().saturating_sub(hook::last_interaction_secs());
             let want = if idle_for >= IDLE_AFTER_SECS {
-                IDLE_FPS
+                idle
             } else {
-                ACTIVE_FPS
+                active
             };
 
             if sent == Some(want) {

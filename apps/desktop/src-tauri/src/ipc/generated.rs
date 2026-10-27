@@ -99,6 +99,13 @@ pub enum PanelCommand {
         #[serde(rename = "enabled")]
         enabled: bool,
     },
+    #[serde(rename = "frameProfileChanged")]
+    FrameProfileChanged {
+        #[serde(rename = "activeFps")]
+        active_fps: f64,
+        #[serde(rename = "idleFps")]
+        idle_fps: f64,
+    },
 }
 
 /// 面板 → 壳
@@ -121,6 +128,13 @@ pub enum PanelEvent {
     SetAutostart {
         #[serde(rename = "enabled")]
         enabled: bool,
+    },
+    #[serde(rename = "setFrameProfile")]
+    SetFrameProfile {
+        #[serde(rename = "activeFps")]
+        active_fps: f64,
+        #[serde(rename = "idleFps")]
+        idle_fps: f64,
     },
 }
 

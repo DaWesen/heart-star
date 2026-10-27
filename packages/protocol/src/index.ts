@@ -102,6 +102,25 @@ export interface CharacterSummary {
  */
 export const CHARACTER_SCALE = { min: 0.5, max: 2, default: 1, step: 0.05 } as const;
 
+/**
+ * 帧率档位 —— 用户可调。
+ *
+ * 为什么把"空闲之后降到多少"交给用户：桌宠是常驻进程，有人动画要丝滑、
+ * 不在乎功耗，有人用笔记本插着电池、宁可它慢一点也不许费电。
+ * 这个权衡只有用户知道，写死任何一个值都是在替用户决定。
+ *
+ * 区间同样放在契约里而不是各自 app 里：面板滑块的 min/max 与壳层的夹紧
+ * 边界必须是同一组数字，否则会出现"面板显示 60 但实际只跑 30"这类问题。
+ */
+export const FRAME_PROFILE = {
+  /** 有交互时的帧率上限 */
+  active: { min: 15, max: 60, step: 5, default: 60 },
+  /** 空闲一段时候降到的帧率 */
+  idle: { min: 5, max: 60, step: 5, default: 15 },
+  /** 无交互多久算空闲（秒）。原型阶段的观测值，先不开放调节 */
+  idleAfterSecs: 30,
+} as const;
+
 /** 面板 → 壳 */
 export type PanelEvent =
   | { type: 'ready' }
@@ -114,7 +133,13 @@ export type PanelEvent =
    * 面板不主动查询。读也走一条消息的话，两边就都能持有各自的版本，
    * 而"谁的状态才是真的"这个问题不该存在 —— 真相只有注册表那一份。
    */
-  | { type: 'setAutostart'; enabled: boolean };
+  | { type: 'setAutostart'; enabled: boolean }
+  /**
+   * 设置帧率档位。两个值一起下发而不是各发一条：
+   * 它们是一组配置，分两次的话中间会出现"活跃档已降、空闲档还没降"的过渡态，
+   * 而这个中间态本身没有任何意义。
+   */
+  | { type: 'setFrameProfile'; activeFps: number; idleFps: number };
 
 /**
  * 壳 → 面板
@@ -137,7 +162,9 @@ export type PanelCommand =
    * 杀软拦下，此时回显会把面板上的勾选拨回去。用户看到的永远是真实状态，
    * 而不是"我以为设成功了"。
    */
-  | { type: 'autostartChanged'; enabled: boolean };
+  | { type: 'autostartChanged'; enabled: boolean }
+  /** 帧率档位已生效。值为夹紧后的结果，面板据此回显 */
+  | { type: 'frameProfileChanged'; activeFps: number; idleFps: number };
 
 // ---------- AI → 渲染（流式）----------
 

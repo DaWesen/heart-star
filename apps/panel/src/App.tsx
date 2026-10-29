@@ -14,7 +14,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CHARACTER_SCALE, FRAME_PROFILE, type CharacterSummary } from '@heart-star/protocol';
+import {
+  CHARACTER_SCALE,
+  FRAME_PROFILE,
+  PROCEDURAL_CLIPS,
+  type CharacterSummary,
+} from '@heart-star/protocol';
 import { bindPanelIpc, sendPanelEvent } from './ipc';
 
 const ABOUT = {
@@ -174,6 +179,7 @@ function SliderRow({
   max,
   step,
   onChange,
+  onDraggingChange,
 }: {
   label: string;
   readout: string;
@@ -182,7 +188,17 @@ function SliderRow({
   max: number;
   step: number;
   onChange: (value: number) => void;
+  onDraggingChange?: (dragging: boolean) => void;
 }) {
+  // 松手可能发生在滑块外面（拖到边上再放开），只听控件自身的 pointerup 会漏，
+  // 于是永远停在"拖动中"，之后所有回显都被丢弃 —— 表现为滑块再也拉不动
+  useEffect(() => {
+    if (!onDraggingChange) return;
+    const up = () => onDraggingChange(false);
+    window.addEventListener('pointerup', up);
+    return () => window.removeEventListener('pointerup', up);
+  }, [onDraggingChange]);
+
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
@@ -197,6 +213,8 @@ function SliderRow({
         value={value}
         // 本地先更新再节流下发：拖动过程要跟手，等 IPC 往返再更新的话手感是黏的
         onChange={(e) => onChange(Number(e.target.value))}
+        onPointerDown={() => onDraggingChange?.(true)}
+        onPointerUp={() => onDraggingChange?.(false)}
         style={{ width: '100%', accentColor: '#ff8fb1' }}
       />
     </div>
@@ -216,6 +234,12 @@ function CharacterPicker() {
   const [scale, setScale] = useState<number>(CHARACTER_SCALE.default);
 
   const throttle = useThrottle(THROTTLE_MS);
+  // 拖动中丢弃回显：下发是节流的，回显到得比手晚，
+  // 用它覆盖正在拖的值就会表现为"拖到一半自己弹回去"
+  const dragging = useRef(false);
+  const onDraggingChange = useCallback((v: boolean) => {
+    dragging.current = v;
+  }, []);
 
   useEffect(() => {
     return bindPanelIpc((cmd) => {
@@ -236,7 +260,7 @@ function CharacterPicker() {
           break;
         case 'characterScaled':
           // 回显渲染层夹紧后的真实值：拖到边界时，这里的数字必须和模型实际大小一致
-          setScale(cmd.scale);
+          if (!dragging.current) setScale(cmd.scale);
           break;
       }
     });
@@ -278,6 +302,7 @@ function CharacterPicker() {
           max={CHARACTER_SCALE.max}
           step={CHARACTER_SCALE.step}
           onChange={changeScale}
+          onDraggingChange={onDraggingChange}
         />
       </div>
     </div>
@@ -344,6 +369,11 @@ function FrameSliders() {
   const [active, setActive] = useState<number>(FRAME_PROFILE.active.default);
   const [idle, setIdle] = useState<number>(FRAME_PROFILE.idle.default);
   const throttle = useThrottle(THROTTLE_MS);
+  // 同 CharacterPicker：拖动中不吃回显，否则手上的值会被上一次的回发拽走
+  const dragging = useRef(false);
+  const onDraggingChange = useCallback((v: boolean) => {
+    dragging.current = v;
+  }, []);
 
   // 下发时要读的是"此刻"的两个值：闭包里直接引用 state 的话，
   // 节流窗口到期时发的是触发那一次的旧快照。
@@ -356,8 +386,10 @@ function FrameSliders() {
         case 'frameProfileChanged':
           // 回显是壳层夹紧后的结果：空闲档不允许高于活跃档，
           // 用户拖出来越界的组合会被压回合法区间，这里跟着更新
-          setActive(cmd.activeFps);
-          setIdle(cmd.idleFps);
+          if (!dragging.current) {
+            setActive(cmd.activeFps);
+            setIdle(cmd.idleFps);
+          }
           break;
       }
     });
@@ -386,6 +418,7 @@ function FrameSliders() {
         max={FRAME_PROFILE.active.max}
         step={FRAME_PROFILE.active.step}
         onChange={(v) => change({ active: v })}
+        onDraggingChange={onDraggingChange}
       />
       <div style={{ marginTop: 8 }}>
         <SliderRow
@@ -396,7 +429,104 @@ function FrameSliders() {
           max={FRAME_PROFILE.idle.max}
           step={FRAME_PROFILE.idle.step}
           onChange={(v) => change({ idle: v })}
+          onDraggingChange={onDraggingChange}
         />
+      </div>
+    </div>
+  );
+}
+
+/** 语义动作组 → 面板上的中文标签。没收录的组直接显示组名，不猜。 */
+const MOTION_LABELS: Record<string, string> = {
+  idle: '待机',
+  greet: '打招呼',
+  sleep: '打瞌睡',
+  wake: '醒来',
+  grab: '被拎起来',
+  drop: '被放下',
+  tap_head: '摸头',
+  tap_body: '摸身体',
+  tap_hand: '摸手',
+  emote_flustered: '被拎起（素材版）',
+  emote_shy: '放下（素材版）',
+};
+
+/** 程序化（合成）动作 → 中文标签 */
+const CLIP_LABELS: Record<string, string> = {
+  peek: '探头',
+  shakeHead: '摇头',
+  hop: '蹦一下',
+  stretch: '伸懒腰',
+  grab: '被拎起来',
+  drop: '放下',
+  doze: '打瞌睡',
+  startle: '惊醒',
+};
+
+/**
+ * 动作试播 —— 把当前角色声明的动作组列成一排按钮，点了就播。
+ *
+ * 存在的理由很实际：一个角色到底有哪些动作、每个动起来长什么样，
+ * 光看 manifest 里的文件名（hiyori_m07）是看不出来的。
+ * 要决定"哪个动作该挂到哪个语义组上"，唯一的办法就是播出来看 ——
+ * 这个按钮就是给这件事用的，比改 JSON 再重启快一个数量级。
+ *
+ * 与 CharacterPicker 各自维护一份"当前角色"：面板里每一项自己把住
+ * 自己关心的消息（见 AutostartToggle 的注释），加一项功能不必去动别人。
+ */
+function MotionButtons() {
+  const [characters, setCharacters] = useState<CharacterSummary[]>([]);
+  const [current, setCurrent] = useState<string | null>(null);
+
+  useEffect(() => {
+    return bindPanelIpc((cmd) => {
+      switch (cmd.type) {
+        case 'characterList':
+          setCharacters(cmd.characters);
+          break;
+        case 'characterSwitched':
+          setCurrent(cmd.characterId);
+          break;
+        case 'characterFailed':
+          setCurrent(null);
+          break;
+      }
+    });
+  }, []);
+
+  // 占位角色没有动作组，此时只显示合成动作那一组 ——
+  // 合成动作是渲染层自己算的，有没有素材都能播
+  const groups = characters.find((c) => c.id === current)?.motionGroups ?? [];
+
+  return (
+    <div style={{ marginTop: 14, borderTop: '1px solid #e6ebf2', paddingTop: 10 }}>
+      <strong>动作试播</strong>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+        {groups.map((g) => (
+          <button
+            key={g}
+            type="button"
+            style={{ ...buttonBase, width: 'auto', marginTop: 0 }}
+            onClick={() => sendPanelEvent({ type: 'playMotion', group: g })}
+          >
+            {MOTION_LABELS[g] ?? g}
+          </button>
+        ))}
+      </div>
+      <div style={{ marginTop: 10, opacity: 0.75 }}>
+        <div style={{ fontSize: 12 }}>合成动作（不靠素材，我们自己的）</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+          {PROCEDURAL_CLIPS.map((c) => (
+            <button
+              key={c}
+              type="button"
+              style={{ ...buttonBase, width: 'auto', marginTop: 0 }}
+              onClick={() => sendPanelEvent({ type: 'playMotion', group: c })}
+            >
+              {CLIP_LABELS[c] ?? c}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -435,6 +565,7 @@ export function App() {
 
       <div style={panelRight}>
         <CharacterPicker />
+        <MotionButtons />
         <FrameSliders />
         <AutostartToggle />
         {/* TODO(M3)：人设 / 语音 / 快捷键 */}

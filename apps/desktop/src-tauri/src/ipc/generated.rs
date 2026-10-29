@@ -40,6 +40,11 @@ pub struct CharacterSummary {
     pub display_name: String,
     #[serde(rename = "kind")]
     pub kind: CharacterKind,
+    /// 该角色声明了哪些动作组（manifest.motions 的键，语义组名）。
+    ///
+    /// 面板据此把"能播什么"列成按钮：动作组是逐角色不同的资产事实， 面板拿不到文件系统、渲染层才知道自己装了什么， 只有壳扫得到 —— 少这一项，试播按钮就只能写死一组合集， 换角色立刻对不上。
+    #[serde(rename = "motionGroups")]
+    pub motion_groups: Vec<String>,
 }
 
 /// 帧预算。'paused' 用于窗口被完全遮挡时。
@@ -135,6 +140,11 @@ pub enum PanelEvent {
         active_fps: f64,
         #[serde(rename = "idleFps")]
         idle_fps: f64,
+    },
+    #[serde(rename = "playMotion")]
+    PlayMotion {
+        #[serde(rename = "group")]
+        group: String,
     },
 }
 
@@ -271,5 +281,10 @@ pub enum ShellCommand {
         x: f64,
         #[serde(rename = "y")]
         y: f64,
+    },
+    #[serde(rename = "playMotion")]
+    PlayMotion {
+        #[serde(rename = "group")]
+        group: String,
     },
 }

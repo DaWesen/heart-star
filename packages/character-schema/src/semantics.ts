@@ -16,6 +16,19 @@ export const SEMANTIC_PARAMS = [
   'joy',
   'anger',
   'sadness',
+  // —— 姿态类（程序化合成动作用）——
+  // 存在的理由：动作文件是素材，素材只有美术能造，数量也永远不够用。
+  // 而"探头""摇头""蹦一下"这类小动作，本质是几个姿态参数随时间走一条曲线，
+  // 完全可以自己合成 —— 前提是有语义能描述"身体朝哪偏"，
+  // 而不是在代码里写死 ParamAngleZ 这种模型私有名。
+  //
+  // 约定：**0.5 为中立**（不偏不倚），两端为极限 —— 姿态参数的范围是
+  // 由模型自己声明的（-30..30 之类），"中立"在中点，不在 0。
+  'poseX', // 左右（脸/身体朝左还是朝右）
+  'poseY', // 上下（抬头 / 低头）
+  'poseZ', // 歪头（左右倾）
+  'crouch', // 下沉（屈腿 / 身体压低），0 为自然
+  'armRaise', // 抬手，0 为放下
 ] as const;
 export type SemanticParam = (typeof SEMANTIC_PARAMS)[number];
 
@@ -46,8 +59,15 @@ export const isEmotionParam = (p: string): p is EmotionParam =>
 export const SEMANTIC_AREAS = ['head', 'body', 'hand'] as const;
 export type SemanticArea = (typeof SEMANTIC_AREAS)[number];
 
-/** 动作组 —— 前四个为约定组，`tap_<area>` / `emote_<emotion>` 为派生命名。 */
-export const MOTION_GROUPS = ['idle', 'greet', 'sleep', 'wake'] as const;
+/**
+ * 动作组 —— 前六个为约定组，`tap_<area>` / `emote_<emotion>` 为派生命名。
+ *
+ * `grab` / `drop` 是桌宠独有的：宠物会被鼠标直接"拎起来"再"放下"，
+ * 这是它与一般 Live2D 看板娘最不一样的一次交互，
+ * 必须有一等公民的名字 —— 拿 `tap_body` 凑会让"被拎起来"和"被摸一下"
+ * 在语义层变成同一件事，上层再也分不开该播哪个。
+ */
+export const MOTION_GROUPS = ['idle', 'greet', 'sleep', 'wake', 'grab', 'drop'] as const;
 export type MotionGroup = (typeof MOTION_GROUPS)[number];
 
 /** 派生动作组名：点击部位反馈 */

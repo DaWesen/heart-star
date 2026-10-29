@@ -42,8 +42,31 @@
 硬把眉毛与嘴形参数凑成情绪映射只会得到扭曲的表情。
 因此这三项在 `pnpm validate:characters` 时报 warning（可降级），属预期，不要为了消警告去填满它。
 
-## 未使用的动作
+## 动作与语义组的对应
 
-模型自带的 `Flick` / `FlickDown` / `FlickUp` / `Tap` / `Flick@Body` 组未写入 manifest，
-因为 `MOTION_GROUPS` 尚无对应语义（`idle` / `greet` / `sleep` / `wake` 与 `tap_<area>`）。
-等语义字典在 M2 定稿后再决定要不要加"挥开"这类组。
+模型自带 7 个动作组，全部已挂到语义组上（见 `manifest.json` 的 `motions`）。
+映射关系是按动作幅度推断的初版，**不是定稿**：
+
+| 语义组 | 模型动作组 | 文件 |
+| --- | --- | --- |
+| `idle` | `Idle` | m01 / m02 / m05 |
+| `tap_head` | `Tap` | m07 / m08 |
+| `tap_body` | `Tap@Body` | m09 |
+| `greet` | `FlickUp` | m06 |
+| `emote_flustered`（慌一下） | `Flick` | m03 |
+| `emote_shy`（低头） | `FlickDown` | m04 |
+| `sleep`（打瞌睡） | `Flick@Body` | m10 |
+
+`grab` / `drop` **没有**素材动作：素材里那两个（m03 / m04）幅度太小，
+拖拽时窗口跟着鼠标走、相对运动为零，动作幅度再小就完全看不出来。
+这两个组由渲染层**合成**（`ProceduralClip` 的 `grab` / `drop`）：
+腿收起 + 身体后仰 + 手臂拉起，做成循环保持的"悬挂姿态"，松手才结束。
+m03 / m04 留在 `emote_*` 里，可以在面板上点着对比。
+
+模型组名（`Flick` 等）与语义组名（`grab` 等）对不上是常态 —— 组名是美术起的。
+解析规则在渲染层 `Live2DAdapter.resolveMotion`：先按组名归一化匹配，
+匹配不到就拿 manifest 里声明的动作文件去 model3 的组里反查。
+**改映射只改 manifest 的 `motions` 表**，不要去改 `runtime/`（不入库）。
+
+`tap_head` 的命中区没有手标（模型只标了胸口的 `HitArea`），
+渲染层按"模型总高顶部 28%"做几何推断，见 `Live2DAdapter.hitsHeadBand`。

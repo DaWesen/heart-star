@@ -102,7 +102,8 @@ export function validateManifest(input: unknown): ValidationResult {
       level: 'warning',
       code: 'HITAREA_HEAD_MISSING',
       path: 'hitAreas.head',
-      message: '未定义 head 命中区域，拍头交互将不可用。',
+      message:
+        '未定义 head 命中区域，拍头将退化为几何推断（模型上部一段）。能标就标，标了才准。',
     });
   }
 

@@ -75,7 +75,18 @@ export type ShellCommand =
    * 省掉一次"壳问渲染、渲染答、壳再命令渲染"的往返 ——
    * 那三跳里任何一跳断了都会变成"点了没反应且没有任何日志"。
    */
-  | { type: 'tap'; x: number; y: number };
+  | { type: 'tap'; x: number; y: number }
+  /**
+   * 播一个语义动作组（`'greet'` / `'grab'` / `'drop'` …，见语义字典）。
+   *
+   * 通用的"播动作"入口：拖拽（被拎起来/放下）、面板上的互动按钮都走它，
+   * 而不是各自定义一条消息 —— 动作组的集合会随语义字典增长，
+   * 每加一个组就加一条命令，等于把字典在协议里抄第二份。
+   *
+   * 角色没有这个组时渲染层静默跳过：那是"这个角色没这套动作"，
+   * 不是错误，也不该弹到用户面前。
+   */
+  | { type: 'playMotion'; group: string };
 
 // ---------- 渲染 → 壳 ----------
 
@@ -100,6 +111,15 @@ export interface CharacterSummary {
   id: string;
   displayName: string;
   kind: CharacterKind;
+  /**
+   * 该角色声明了哪些动作组（manifest.motions 的键，语义组名）。
+   *
+   * 面板据此把"能播什么"列成按钮：动作组是逐角色不同的资产事实，
+   * 面板拿不到文件系统、渲染层才知道自己装了什么，
+   * 只有壳扫得到 —— 少这一项，试播按钮就只能写死一组合集，
+   * 换角色立刻对不上。
+   */
+  motionGroups: string[];
 }
 
 /**
@@ -130,6 +150,28 @@ export const FRAME_PROFILE = {
   idleAfterSecs: 30,
 } as const;
 
+/**
+ * 程序化（合成）动作的 id —— 渲染层自己算出来的动作，不依赖素材文件。
+ *
+ * 放进契约而不是让面板硬编码：面板要列按钮，而"渲染层会合成哪些动作"
+ * 是渲染层的能力事实。硬编码在面板里的后果是渲染层加一个动作、
+ * 面板立刻少一个按钮，且没有任何报错。
+ *
+ * 它们与素材动作组共用一个 `playMotion` 入口（`ShellCommand.playMotion`），
+ * 上层不需要区分"这是素材动作还是合成的"。
+ */
+export const PROCEDURAL_CLIPS = [
+  'peek', // 探头
+  'shakeHead', // 摇头
+  'hop', // 蹦一下
+  'stretch', // 伸懒腰
+  'grab', // 被拎起来（循环保持，和拖拽触发的是同一个）
+  'drop', // 被放下
+  'doze', // 打瞌睡（循环，点一下会一直点头）
+  'startle', // 惊醒
+] as const;
+export type ProceduralClip = (typeof PROCEDURAL_CLIPS)[number];
+
 /** 面板 → 壳 */
 export type PanelEvent =
   | { type: 'ready' }
@@ -148,7 +190,9 @@ export type PanelEvent =
    * 它们是一组配置，分两次的话中间会出现"活跃档已降、空闲档还没降"的过渡态，
    * 而这个中间态本身没有任何意义。
    */
-  | { type: 'setFrameProfile'; activeFps: number; idleFps: number };
+  | { type: 'setFrameProfile'; activeFps: number; idleFps: number }
+  /** 让宠物播一个动作（如打招呼）。由壳层转成 `ShellCommand.playMotion` 转发。 */
+  | { type: 'playMotion'; group: string };
 
 /**
  * 壳 → 面板

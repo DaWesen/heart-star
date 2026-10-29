@@ -11,7 +11,12 @@
     "lookY": "ParamEyeBallY",
     "lipSync": "ParamMouthOpenY",
     "breath": "ParamBreath",
-    "blink": ["ParamEyeLOpen", "ParamEyeROpen"]
+    "blink": ["ParamEyeLOpen", "ParamEyeROpen"],
+    "poseX": ["ParamAngleX", "ParamBodyAngleX"],
+    "poseY": ["ParamAngleY", "ParamBodyAngleY"],
+    "poseZ": ["ParamAngleZ", "ParamBodyAngleZ"],
+    "crouch": ["ParamLeg", "ParamBodyAngleY"],
+    "armRaise": ["ParamArmLA", "ParamArmRA", "ParamShoulder"]
   },
   "hitAreas": {
     "body": { "type": "drawable", "target": "HitArea" }
@@ -22,7 +27,12 @@
       "motion/hiyori_m02.motion3.json",
       "motion/hiyori_m05.motion3.json"
     ],
-    "tap_body": ["motion/hiyori_m09.motion3.json"]
+    "tap_head": ["motion/hiyori_m07.motion3.json", "motion/hiyori_m08.motion3.json"],
+    "tap_body": ["motion/hiyori_m09.motion3.json"],
+    "greet": ["motion/hiyori_m06.motion3.json"],
+    "emote_flustered": ["motion/hiyori_m03.motion3.json"],
+    "emote_shy": ["motion/hiyori_m04.motion3.json"],
+    "sleep": ["motion/hiyori_m10.motion3.json"]
   },
   "expressions": {},
   "rig": {

@@ -105,6 +105,12 @@ export const SemanticsSchema = z
     joy: ParamTargetSchema.optional(),
     anger: ParamTargetSchema.optional(),
     sadness: ParamTargetSchema.optional(),
+    // 姿态类：程序化合成动作 writes 这些，见 semantics.ts 的说明
+    poseX: ParamTargetSchema.optional(),
+    poseY: ParamTargetSchema.optional(),
+    poseZ: ParamTargetSchema.optional(),
+    crouch: ParamTargetSchema.optional(),
+    armRaise: ParamTargetSchema.optional(),
   })
   .strict();
 

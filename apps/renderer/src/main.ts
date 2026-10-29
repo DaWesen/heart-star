@@ -16,6 +16,18 @@ if (!stage) {
 const host = new RendererHost(stage);
 const bridge = new IpcBridge(host);
 
+// 全局兜底：渲染层死了的表现是"桌宠一动不动"，而没有这条的话，
+// 连一行异常都到不了壳层日志 —— 排查时只看到画面停了，什么线索都没有。
+// attach 之前发生的异常会因 transport 未挂而丢失，那段窗口极短，可接受。
+const report = (message: string) =>
+  bridge.emit({ type: 'error', message, fatal: false });
+window.addEventListener('error', (e) => {
+  report(`未捕获异常: ${e.message} @ ${e.filename}:${e.lineno}`);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  report(`未处理的 Promise 拒绝: ${String(e.reason)}`);
+});
+
 // 只有跑在 Tauri 里才挂真实 transport。
 // 纯 vite dev（浏览器直接开 5173）下没有 Tauri 全局对象，挂了会抛错，
 // 而"不启动壳层就能调试渲染层"是刻意保留的能力。

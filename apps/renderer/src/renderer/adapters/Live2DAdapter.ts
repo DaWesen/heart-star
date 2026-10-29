@@ -46,17 +46,32 @@ interface Live2DInternals {
   getDrawableIndex?(id: string): number;
   getDrawableVertices?(index: number): ArrayLike<number>;
   motionManager?: {
-    definitions?: Record<string, unknown>;
+    definitions?: Record<string, Array<{ File?: string } | undefined>>;
     /**
      * 动作状态机。只声明要改的那一个方法 —— 它决定"动作放完要不要自动接 idle"，
      * 而库默认是"要"，角色因此几乎从不停下来。
      */
     state?: { shouldRequestIdleMotion?: () => boolean };
+    stopAllMotions?(): void;
   };
 }
 
 /** 参数范围读不到时的兜底。眼球/角度类参数常见量级。 */
 const FALLBACK_RANGE = { min: -1, max: 1 };
+
+/**
+ * `setLift(1)` 时上移多少个身高。
+ *
+ * 取 0.18 是"脚明显离地但人没飞出去"—— 桌宠被鼠标拎着走就该是这一点点。
+ */
+const LIFT_RANGE = 0.22;
+
+/**
+ * "头部带"占模型总高的比例。
+ *
+ * 人形角色的头大致落在这一段里；取小了会点不中，取大了会把胸口也判成头。
+ */
+const HEAD_BAND_RATIO = 0.28;
 
 export class Live2DAdapter implements CharacterRenderer {
   readonly kind = 'live2d' as const;
@@ -87,6 +102,23 @@ export class Live2DAdapter implements CharacterRenderer {
    */
   private naturalWidth = 0;
   private naturalHeight = 0;
+
+  /**
+   * 模型在**模型画布坐标系**里的纵向范围，载入时锁定。
+   *
+   * 锁的是载入瞬间的初始姿态：之后它会随动作摆动，
+   * 用实时包围盒的话"头部带"会随着呼吸上下漂，判定就不稳了。
+   */
+  private modelTop = 0;
+  private modelHeight = 0;
+
+  /** 参数范围缓存。模型载入后范围是静态的，见 paramRange。 */
+  private readonly paramRanges = new Map<string, { min: number; max: number }>();
+
+  /** 落地时的 y（fit 得出的），被拎起来的位移以它为基准 */
+  private baseY = 0;
+  /** 当前离地量，单位见 setLift */
+  private lift = 0;
 
   constructor(private readonly container: HTMLElement) {}
 
@@ -138,6 +170,7 @@ export class Live2DAdapter implements CharacterRenderer {
     // 必须在模型开始 update 之前关掉：一旦跑起来，库就会在第一帧
     // 立刻排一个 idle 进去（此时没有任何动作在播）。
     this.suppressAutoIdle();
+    this.measureModel();
 
     const measured = this.measure();
     this.applyBounds(measured.width, measured.height);
@@ -169,14 +202,80 @@ export class Live2DAdapter implements CharacterRenderer {
     const model = this.model;
     if (!model) return;
 
-    const index = Number.isNaN(Number(req.id)) ? undefined : Number(req.id);
-    // 动作组名对大小写不敏感：model3.json 里习惯写 Idle / TapBody，
-    // 而我们的语义组名是 idle / tap_body，直接传会找不到组。
+    const resolved = this.resolveMotion(req.group, req.id);
     void model
-      .motion(this.resolveGroup(req.group), index, req.priority)
-      // 组不存在会 reject；这里是用户点了没对应动作，静默即可，
+      // 组不存在会 reject；这里是"这个角色没有对应动作"，静默即可，
       // 抛出去会让整条切换链路被判为失败。
+      .motion(resolved.group, resolved.index, req.priority)
       .catch(() => undefined);
+  }
+
+  /**
+   * 语义动作组 → 模型里的真实组（+ 可选索引）。
+   *
+   * 两级解析，先后次序是有讲究的：
+   *
+   * 1. **组名归一化匹配**：model3.json 里习惯写 `Idle` / `Tap@Body`，
+   *    我们的语义组名是 `idle` / `tap_body`，忽略大小写与 `@ _ -` 后相等即命中。
+   * 2. **按 manifest 声明的动作文件反查**：模型的组名是美术起的
+   *    （日和身上是 `Flick` / `FlickUp` / `Tap`…），和我们的语义组名
+   *    （`greet` / `grab` / `drop`）对不上，而这层不能靠猜。
+   *    manifest 里写的是"这个语义组由哪几个动作文件组成"，
+   *    拿着文件名去 model3 的组里找，就能得到它真正的组名与下标。
+   *
+   *    为什么不在 model3.json 里把组名直接改成语义名：`runtime/` 是不入库的
+   *    （见 NOTICE.md），改它等于改一份别人拿不到的文件，
+   *    下次拿到官方原包就全丢。manifest 入库，映射关系必须由它持有。
+   *
+   * 命中多个文件时随机挑一个 —— 同一语义组里挂几个动作就是为了有变化。
+   */
+  private resolveMotion(group: string, id?: string): { group: string; index?: number } {
+    const byName = this.resolveGroup(group);
+    if (byName !== group) {
+      // 组名对上了，索引交给库在组内随机（除非调用方指定了）
+      return { group: byName, index: this.motionIndex(id) };
+    }
+
+    const candidates = this.filesToSlots(group);
+    if (candidates.length === 0) {
+      return { group, index: this.motionIndex(id) };
+    }
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    if (!pick) return { group, index: this.motionIndex(id) };
+    return { group: pick.group, index: pick.index };
+  }
+
+  /** `id` 是数字字符串时作为组内下标；省略则由库随机。 */
+  private motionIndex(id?: string): number | undefined {
+    if (id === undefined) return undefined;
+    const n = Number(id);
+    return Number.isNaN(n) ? undefined : n;
+  }
+
+  /** manifest 里该语义组的动作文件 → model3 中对应的（组, 下标）。 */
+  private filesToSlots(group: string): { group: string; index: number }[] {
+    const files = this.manifest?.motions[group];
+    const definitions = this.internals()?.motionManager?.definitions;
+    if (!files?.length || !definitions) return [];
+
+    const slots: { group: string; index: number }[] = [];
+    for (const file of files) {
+      const wanted = file.replace(/^.*\//, '').toLowerCase();
+      for (const [name, entries] of Object.entries(definitions)) {
+        const index = (entries ?? []).findIndex(
+          (e) => (e?.File ?? '').replace(/^.*\//, '').toLowerCase() === wanted,
+        );
+        if (index >= 0) {
+          slots.push({ group: name, index });
+          break;
+        }
+      }
+    }
+    return slots;
+  }
+
+  stopMotion(): void {
+    this.internals()?.motionManager?.stopAllMotions?.();
   }
 
   setExpression(id: string): void {
@@ -226,36 +325,61 @@ export class Live2DAdapter implements CharacterRenderer {
     // 而这里传的是普通对象（没有 clone 方法），走默认值就是一次 TypeError。
     // 付出的代价是两个入参都得断言成 Point —— 只为不引入 pixi 的运行时依赖。
     const local = model.toModelPosition({ x, y } as Point, { x: 0, y: 0 } as Point);
-    const hits = internals.hitTest(local.x, local.y);
+    const onModel = this.hitsSilhouette(internals, local.x, local.y);
+
+    // 头的几何推断必须**最先**判：官方模型的 HitArea 常是一整块覆盖全身的
+    // 透明 drawable（日和就是），它的包围盒连头一起盖住 ——
+    // 无论是先判语义区还是先做就近兜底，摸头都会被吞成 body（实测正是如此）。
+    // 美术真标了 head 的话，几何判定和标注也必然一致，不存在冲突。
+    if (onModel && this.hitsHeadBand(local.y)) return 'head';
 
     // 命中的是模型内部的 drawable 名，翻回语义部位。
     // 只看 drawable 型：Cubism 的命中区域就是 drawable，
     // box / mesh 是给 3D 用的包围体，这里没有对应的命中来源。
+    const hits = internals.hitTest(local.x, local.y);
     for (const [area, def] of Object.entries(this.manifest?.hitAreas ?? {})) {
       if (def.type === 'drawable' && hits.includes(def.target)) return area as SemanticArea;
     }
 
-    return this.fallbackArea(internals, local.x, local.y);
+    // 落到这一步的是"点在角色身上、但没盖进任何标注区"的情况
+    return onModel ? this.nearestArea(internals, local.x, local.y) : null;
   }
 
   /**
-   * 语义命中区没盖住时的兜底。
+   * 头部判定 —— 模型没标 head 命中区时的几何兜底。
    *
-   * 语义命中区是美术在模型里手标的一小块 drawable（日和只有胸口一块），
+   * 日和的 drawable 名是一串 `ArtMeshNN`，从名字看不出哪块是脸，
+   * 而 model3 里手标的命中区只有胸口一块（`HitArea`），
+   * 于是"摸头"这个最自然的交互根本无从下手。
+   *
+   * 这里用**相对高度**判：点了角色轮廓，且落在模型总高的顶部一小段里，
+   * 就算摸头。人形角色的头就在这一段，够用且不用改素材。
+   * 美术一旦标了 `hitAreas.head`，上面的精确判定会先命中，本兜底自然让位。
+   */
+  private hitsHeadBand(y: number): boolean {
+    // 载入时测的可能是未初始化的顶点（模型还没跑过第一次 update，
+    // drawable 顶点全是 0），测不出范围就先放弃 —— 等真的要点它时再补测。
+    if (this.modelHeight <= 0) this.measureModel();
+    if (this.modelHeight <= 0) return false;
+    return y <= this.modelTop + this.modelHeight * HEAD_BAND_RATIO;
+  }
+
+  /** 语义命中区都没盖住时，取**离点击最近**的标注部位。
+   *
+   * 语义命中区是美术在模型里手标的 drawable（日和只有一块），
    * 盖不住头发、裙摆、腿这些大面积部位 —— 而命中判定随动作摆动还会漂移。
    * 点在角色身上却毫无反应，用户只会把点击当成坏的；
    * 比起"部位判错"，"摸到了却没反应"严重得多。
    *
-   * 所以只要点落在模型的多边形轮廓里，就按"摸到了"处理，
    * 部位取**离点击最近的标注区**：只有一个标注区时必然选中它，
-   * 有多个时也大概率符合直觉。点在角色轮廓之外（窗口空白处）仍返回 null。
+   * 有多个时也大概率符合直觉。是否点在角色身上由调用方先行判定
+   * （见 hitTest 里的 onModel），点在轮廓之外（窗口空白处）返回 null。
    */
-  private fallbackArea(internals: Live2DInternals, x: number, y: number): SemanticArea | null {
+  private nearestArea(internals: Live2DInternals, x: number, y: number): SemanticArea | null {
     const areas = Object.entries(this.manifest?.hitAreas ?? {}).filter(
       ([, def]) => def.type === 'drawable',
     );
     if (areas.length === 0) return null;
-    if (!this.hitsSilhouette(internals, x, y)) return null;
 
     let best: SemanticArea | null = null;
     let bestDist = Number.POSITIVE_INFINITY;
@@ -270,6 +394,30 @@ export class Live2DAdapter implements CharacterRenderer {
       }
     }
     return best;
+  }
+
+  /** 量出模型的纵向范围（所有 drawable 顶点的并集）。 */
+  private measureModel(): void {
+    const internals = this.internals();
+    const verticesOf = internals?.getDrawableVertices;
+    const count = internals?.coreModel?.getDrawableCount?.() ?? 0;
+    if (!verticesOf || !internals || count <= 0) return;
+
+    let top = Number.POSITIVE_INFINITY;
+    let bottom = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < count; i += 1) {
+      const v = verticesOf.call(internals, i);
+      if (!v) continue;
+      for (let k = 1; k < v.length; k += 2) {
+        const y = v[k] as number;
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+      }
+    }
+    if (!Number.isFinite(top) || !Number.isFinite(bottom) || bottom <= top) return;
+
+    this.modelTop = top;
+    this.modelHeight = bottom - top;
   }
 
   /** 点是否落在模型的任一 drawable 多边形里（≈ 点在角色身上）。 */
@@ -343,6 +491,8 @@ export class Live2DAdapter implements CharacterRenderer {
     this.model = null;
     this.app = null;
     this.manifest = null;
+    // 范围属于这个模型，换了角色就不该再带着走
+    this.paramRanges.clear();
   }
 
   private internals(): Live2DInternals | null {
@@ -378,6 +528,12 @@ export class Live2DAdapter implements CharacterRenderer {
   }
 
   private paramRange(name: string): { min: number; max: number } {
+    // 参数范围在模型载入之后就是静态的，而这里是**每帧每参数**都要走的
+    // 热路径 —— 一次查范围要三次 core 调用（找下标 + 读 min + 读 max），
+    // 十来个姿态参数每帧就是几十次。缓存掉它们，热路径只剩一次写值。
+    const cached = this.paramRanges.get(name);
+    if (cached) return cached;
+
     const core = this.internals()?.coreModel;
     const index = core?.getParameterIndex?.(name) ?? -1;
     if (index < 0) return FALLBACK_RANGE;
@@ -387,7 +543,9 @@ export class Live2DAdapter implements CharacterRenderer {
     if (min === undefined || max === undefined || !Number.isFinite(min) || !Number.isFinite(max)) {
       return FALLBACK_RANGE;
     }
-    return { min, max };
+    const range = { min, max };
+    this.paramRanges.set(name, range);
+    return range;
   }
 
   /**
@@ -438,6 +596,34 @@ export class Live2DAdapter implements CharacterRenderer {
 
     model.anchor.set(manifest.anchor.x, manifest.anchor.y);
     model.position.set(this.width * manifest.anchor.x, this.height * manifest.anchor.y);
+
+    // 落地位置：被拎起来的位移要从这里起算，
+    // 而每次 fit（改窗口大小 / 改缩放）都会重算一次落位
+    this.baseY = model.position.y;
+    this.applyLift();
+  }
+
+  setLift(ratio: number): void {
+    this.lift = clampSigned(ratio);
+    this.applyLift();
+  }
+
+  /**
+   * 整体上移/下移 —— **位移**，不是姿态。
+   *
+   * 姿态参数只能让模型转、倾、屈，"被拎起来"最要紧的那一下
+   * （脚离开地面）却只能靠位移表达：拉着她走的时候窗口跟着鼠标动，
+   * 相对运动为零，光靠姿态再怎么扭都看不出"她被提起来了"。
+   *
+   * 单位用**身高的比例**而不是像素：这样不同角色、不同缩放下
+   * 抬起来的观感一致，不用为每个模型单独调一个数。
+   */
+  private applyLift(): void {
+    const model = this.model;
+    if (!model || this.height <= 0) return;
+
+    const bodyHeight = this.naturalHeight * model.scale.y;
+    model.position.y = this.baseY - this.lift * bodyHeight * LIFT_RANGE;
   }
 
   private measure(): { width: number; height: number } {
@@ -461,11 +647,21 @@ const clampSigned = (v: number): number => (v < -1 ? -1 : v > 1 ? 1 : v);
 /** 组名比对用的归一化：忽略大小写与 @ _ - 这类分隔符差异 */
 const normalize = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-/** 点是否在多边形内（奇偶规则）。顶点形如 [x0, y0, x1, y1, …]。 */
+/**
+ * 点是否在多边形内（奇偶规则）。顶点形如 [x0, y0, x1, y1, …]。
+ *
+ * `j` 用取模算而不是常见的 `for (…; j = i++)`：那种写法把自增塞进增量表达式里，
+ * 漏写一个 `++` 就是**一个永不终止的循环**（`i` 不再前进），而它表现得不抛错、
+ * 不报错 —— 只是命中判定再也不返回，渲染层从此一动不动，连重载都救不回来。
+ * 踩过一次，这里宁可多一次取模也要把推进写清楚。
+ */
 const pointInPolygon = (x: number, y: number, v: ArrayLike<number>): boolean => {
   const n = v.length >> 1;
+  if (n < 3) return false;
+
   let inside = false;
-  for (let i = 0, j = n - 1; i < n; j = i) {
+  for (let i = 0; i < n; i += 1) {
+    const j = (i + n - 1) % n;
     const xi = v[i * 2] as number;
     const yi = v[i * 2 + 1] as number;
     const xj = v[j * 2] as number;

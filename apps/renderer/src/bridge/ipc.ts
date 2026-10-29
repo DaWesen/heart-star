@@ -109,6 +109,9 @@ export class IpcBridge {
         this.emit({ type: 'hitTest', area });
         break;
       }
+      case 'playMotion':
+        this.host.playMotion(cmd.group);
+        break;
       case 'switchCharacter':
         this.switchCharacter(cmd.characterId);
         break;
@@ -157,7 +160,12 @@ export class IpcBridge {
     }
   }
 
-  private emit(event: RendererEvent): void {
+  /**
+   * 上报事件。对外可见是刻意的：渲染层需要它做全局兜底上报
+   * （见 main.ts），否则页面级别的异常永远传不到壳层。
+   * transport 未挂载时静默丢弃 —— 纯 vite dev 下没有对端，不报错才对。
+   */
+  emit(event: RendererEvent): void {
     this.transport?.emit(event);
   }
 }

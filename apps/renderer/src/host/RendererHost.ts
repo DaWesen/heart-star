@@ -2,6 +2,7 @@ import type {
   CharacterManifest,
   RendererCapabilities,
   SemanticArea,
+  SemanticParam,
 } from '@heart-star/character-schema';
 import type { PetForm } from '@heart-star/protocol';
 import { loadManifest } from '../character/manifest';
@@ -10,31 +11,29 @@ import type { CharacterRenderer } from '../renderer/CharacterRenderer';
 import { createAdapter } from '../renderer/adapters';
 import { GazeController } from './GazeController';
 
-/** 点击反馈的动作优先级。高于 idle，低于 AI 主动发起的动作。 */
-const TAP_PRIORITY = 2;
+/**
+ * 交互动作（被摸、被拎起来、打招呼…）的优先级。
+ * 高于 idle，低于 AI 主动发起的动作。
+ */
+const INTERACTION_PRIORITY = 2;
 
 /** 待机动作优先级。最低 —— 任何主动交互都能盖过它。 */
 const IDLE_PRIORITY = 1;
 
-/**
- * 两次待机动作之间的间隔（秒），在这个区间里随机取值。
- *
- * 定成十几秒量级是刻意的：待机小动作的意义是"它活着"，
- * 而不是"它一直在表演"。连成一片之后，用户主动点一下的反应
- * 就淹没在里面了 —— 看上去像点了没反应。
- */
-const IDLE_GAP_MIN_SEC = 12;
-const IDLE_GAP_MAX_SEC = 24;
+import { FrameScheduler, type FrameRate } from './FrameScheduler';
+import { IdleDirector } from './IdleDirector';
+import { CLIPS, ClipPlayer, findClip, type Clip } from './ProceduralClip';
 
 /**
- * 换角后第一次待机的间隔（秒）。
+ * 被放下之后的小反应。
  *
- * 比常规间隔短得多：刚切过来的角色如果一二十秒纹丝不动，
- * 第一眼会被误判成"卡住了 / 没加载出来"。
+ * 光"落地"是一个物理事件，不是一次交流 —— 拖完就站着不动，
+ * 和"她根本没感觉到被摸过"是一样的。补这一下才算真的有来有回。
  */
-const IDLE_FIRST_GAP_MIN_SEC = 3;
-const IDLE_FIRST_GAP_MAX_SEC = 7;
-import { FrameScheduler, type FrameRate } from './FrameScheduler';
+const AFTER_DROP: readonly Clip[] = [CLIPS.shakeHead, CLIPS.peek];
+
+/** 落地后接一句的概率。留一点"什么也不说"的时候，不然每次都一样反而假。 */
+const AFTER_DROP_CHANCE = 0.75;
 
 /**
  * 占位角色的着色：由角色 id 派生一个色相。
@@ -50,6 +49,12 @@ function tintFor(characterId: string): string {
   }
   return `hsl(${hash} 70% 72%)`;
 }
+
+const pick = <T>(items: readonly T[]): T => {
+  const item = items[Math.floor(Math.random() * items.length)];
+  // 非空常量数组，取不到只可能是索引算错 —— 真发生了也别崩在渲染循环里
+  return (item ?? items[0]) as T;
+};
 
 /**
  * 渲染宿主
@@ -82,14 +87,16 @@ export class RendererHost {
   private readonly gaze = new GazeController();
 
   /**
-   * 待机动作排程器。
+   * 待机导演。
    *
    * 库（Live2D）的默认行为是"动作放完立刻接下一个待机"，角色几乎
-   * 永不停歇。本类接管这件事：待机是**间隔**发生的，中间留出静止，
-   * 让用户主动交互的动作能被看见。
+   * 永不停歇。这件事由导演接管：什么时候动、动素材动作还是程序化动作、
+   * 冷落久了要不要打瞌睡，都在这里定。
    */
-  private idleElapsed = 0;
-  private idleGap = randomBetween(IDLE_FIRST_GAP_MIN_SEC, IDLE_FIRST_GAP_MAX_SEC);
+  private readonly director = new IdleDirector();
+
+  /** 程序化动作片段的播放器。与动作文件互斥，见 ProceduralClip 的说明。 */
+  private readonly clips = new ClipPlayer();
 
   /**
    * 帧统计回调，由 IpcBridge 注入。
@@ -128,9 +135,12 @@ export class RendererHost {
     this.capabilities = next.capabilities;
     this.characterId = manifest.id;
 
-    // 新角色从头开始排：旧角色的进度留着没有意义，
+    // 待机节奏从头开始：旧角色的进度留着没有意义，
     // 而且可能刚好在换上的一瞬间就甩出一个待机动作
-    this.resetIdle(IDLE_FIRST_GAP_MIN_SEC, IDLE_FIRST_GAP_MAX_SEC);
+    this.director.noteInteraction();
+    // 没有待机动作文件的角色只能靠程序化动作撑着 ——
+    // 否则它在没人理的时候会一动不动，看着和卡住了一样
+    this.director.setIdleMotionAvailable((manifest.motions.idle?.length ?? 0) > 0);
   }
 
   /** 当前角色 id。角色切换完成前为 null。 */
@@ -203,13 +213,93 @@ export class RendererHost {
 
     const area = renderer.hitTest(x, y);
     if (area) {
-      renderer.playMotion({ group: `tap_${area}`, priority: TAP_PRIORITY });
-
-      // 交互刚发生就把待机往后推：否则被摸的反应可能刚播到一半
-      // 就被下一个待机动作接上，"我点它才有反应"这件事就白做了
-      this.resetIdle();
+      this.beginInteraction(renderer);
+      this.playAssetMotion(renderer, `tap_${area}`);
     }
     return area;
+  }
+
+  /**
+   * 播一个素材动作。
+   *
+   * 播之前必须先停掉正在播的那个：库对**同优先级**的动作是拒绝而不是打断
+   * （`MotionManager.reserve()` 里 `priority <= currentPriority` 直接返回 false，
+   * 而优先级只在动作自然播完时才归零）。于是一次交互动作没播完之前，
+   * 后续所有交互动作都被静默丢弃 —— 连着摸她两下，第二下毫无反应，
+   * 用户眼里就是"她卡住了、叫不动了"。
+   * 先停一次把优先级清回 NONE，新的才排得进去。
+   */
+  private playAssetMotion(renderer: CharacterRenderer, group: string): void {
+    renderer.stopMotion?.();
+    renderer.playMotion({ group, priority: INTERACTION_PRIORITY });
+  }
+
+  /**
+   * 播一个语义动作组（`greet` / `grab` / `drop` …）或程序化片段（`hop` …）。
+   *
+   * 入口有两类，都是"用户明确做了某件事"：壳层报的拖拽（被拎起来/放下）、
+   * 面板上的互动按钮。它们都不带坐标 —— 命中判定只对点击有意义。
+   *
+   * 为什么把程序化片段也塞进同一个入口：对上层来说"播一个动作"就是
+   * 播一个动作，它是素材动作还是合成的，上层不该知道也不该关心 ——
+   * 否则每加一个合成动作就要在协议里加一条命令。
+   *
+   * 角色没有这个组时由 adapter 静默跳过：那是"这个角色没这套动作"，
+   * 不是错误，不该弹到用户面前。
+   */
+  playMotion(group: string): void {
+    const renderer = this.renderer;
+    if (!renderer) return;
+
+    const clip = findClip(group);
+    if (clip) {
+      // 先停掉正在播的素材动作：它每帧都会覆盖姿态参数，
+      // 不停的话合成动作写的东西等于白写 —— 拖拽时最明显，
+      // 按下那一下播的"被摸"反应会把"被拎起来"压掉两秒。
+      renderer.stopMotion?.();
+
+      if (group === 'drop') {
+        // 落地也算一次交互：拖了很久再放手的话，"距上次交互"已经很长了，
+        // 不重置的话她刚被放下就立刻接着打瞌睡 —— 看着像根本没醒过
+        this.director.noteInteraction();
+        // 落地之后补一个小反应，两拍连着播（播放器负责无缝接上）
+        this.clips.play(
+          clip,
+          Math.random() < AFTER_DROP_CHANCE ? pick(AFTER_DROP) : null,
+        );
+        return;
+      }
+
+      // 合成动作不重排待机节奏：它本来就是"动一下"，
+      // 跟着重置一次间隔反而会让接下来的待机来得莫名其妙地晚
+      this.clips.play(clip);
+      return;
+    }
+
+    this.beginInteraction(renderer);
+    this.playAssetMotion(renderer, group);
+  }
+
+  /**
+   * 一次主动交互开始了（被摸、被拎起来、面板按钮）。
+   *
+   * 三件事必须一起做，少一件交互感就散了：
+   *  1. 停掉正在播的程序化片段 —— 动作会整帧覆盖姿态参数，
+   *     不停的话片段那边还在写，看着像抽搐。
+   *  2. 告诉导演"有人理她了"：待机排程重新计时，
+   *     否则被摸的反应刚播到一半就被下一个待机动作接走。
+   *  3. 若她正在打瞌睡，播"惊醒"。
+   */
+  private beginInteraction(renderer: CharacterRenderer): void {
+    const rest = this.clips.stop();
+    if (rest) {
+      this.writeParams(renderer, rest);
+      // 人也要放回地面 —— 停在半空接一个"被摸"的动作非常怪
+      renderer.setLift?.(0);
+    }
+
+    const startle = this.director.noteInteraction();
+    if (startle) this.clips.play(startle);
   }
 
   /**
@@ -241,7 +331,22 @@ export class RendererHost {
     const renderer = this.renderer;
     if (!renderer) return;
 
-    this.pumpIdle(dt, renderer);
+    // 程序化片段优先：它在播的时候不排任何动作 —— 动作会覆盖姿态参数，
+    // 两者同时跑的结果是"看起来什么都没发生"
+    const clipValues = this.clips.update(dt);
+    // 离地量每帧都要发：它在片段结束后要自己归零，
+    // 只在"有值"时写会让人永远悬在半空下不来
+    renderer.setLift?.(this.clips.lift);
+    if (clipValues) {
+      this.writeParams(renderer, clipValues);
+    } else {
+      const plan = this.director.update(dt);
+      if (plan?.kind === 'motion') {
+        renderer.playMotion({ group: plan.group, priority: IDLE_PRIORITY });
+      } else if (plan) {
+        this.clips.play(plan.clip);
+      }
+    }
 
     // 视线按帧推进，而不是收到消息就写：消息是 30Hz 的离散输入，
     // 逐条直接写会让眼睛跳动
@@ -250,33 +355,12 @@ export class RendererHost {
     renderer.render(dt);
   }
 
-  /**
-   * 按间隔排一次待机动作。
-   *
-   * 间隔从"上一次排程"起算，而不是从"动作播完"起算：
-   * 动作时长随角色和文件变，去追问它会把这份逻辑绑死在具体模型上。
-   * 撞上还在播的动作也不要紧 —— idle 优先级最低，库会直接拒绝这次请求
-   * （详见 Live2DAdapter.suppressAutoIdle 引用的那段库代码），
-   * 结果只是"少播一次"，不会出现两个动作打架。
-   */
-  private pumpIdle(dt: number, renderer: CharacterRenderer): void {
-    this.idleElapsed += dt;
-    if (this.idleElapsed < this.idleGap) return;
-
-    renderer.playMotion({ group: 'idle', priority: IDLE_PRIORITY });
-    this.resetIdle();
-  }
-
-  /** 重新抽一次待机间隔。不传参数时用常规区间。 */
-  private resetIdle(
-    min = IDLE_GAP_MIN_SEC,
-    max = IDLE_GAP_MAX_SEC,
+  private writeParams(
+    renderer: CharacterRenderer,
+    values: Map<SemanticParam, number>,
   ): void {
-    this.idleElapsed = 0;
-    // 固定间隔会让人看出节拍，随机一下才像"它自己想动一下"
-    this.idleGap = randomBetween(min, max);
+    for (const [semantic, value] of values) {
+      renderer.setParameter(semantic, value);
+    }
   }
 }
-
-const randomBetween = (min: number, max: number): number =>
-  min + Math.random() * (max - min);

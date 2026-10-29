@@ -49,10 +49,32 @@ export interface CharacterRenderer {
   load(manifest: CharacterManifest): Promise<void>;
 
   playMotion(req: MotionRequest): void;
+
+  /**
+   * 停掉正在播的素材动作。
+   *
+   * 为什么需要它：素材动作会**整帧覆盖**它涉及的那些参数，
+   * 合成动作写进去的姿态会被它盖掉 —— 拖拽时尤其明显，
+   * 按下那一下播的"被摸"反应正好把"被拎起来"压住两秒。
+   * 可选是因为占位渲染器没有动作可言。
+   */
+  stopMotion?(): void;
+
   setExpression(id: string): void;
 
   /** 语义参数写入。adapter 内部完成语义 → 实际参数名/骨骼的映射。 */
   setParameter(semantic: SemanticParam, value: number): void;
+
+  /**
+   * 整体上移/下移，单位是**身高的比例**（0 = 站在地上）。
+   *
+   * 这是**位移**而不是姿态参数：参数只能让模型转、倾、屈，
+   * 造不出"脚离开地面"这种事 —— 而"被拎起来"看不看得出来，全在这一个位移上。
+   * 用身高比例而不是像素，是为了不同角色、不同缩放下的观感一致。
+   *
+   * 可选：占位渲染器没有"身高"可言。
+   */
+  setLift?(ratio: number): void;
 
   /** 视线跟随，归一化坐标（-1..1） */
   lookAt(nx: number, ny: number): void;

@@ -21,7 +21,11 @@ export async function loadManifest(characterId: string): Promise<CharacterManife
   }
 
   const url = `/characters/${characterId}/manifest.json`;
-  const res = await fetch(url);
+  // no-store 是必须的：manifest 是我们改得最勤的文件（动作映射、语义表
+  // 都在它身上），而 WebView2 的 HTTP 缓存跨进程存活 ——
+  // 不禁的话改完 manifest 重启应用，渲染层读到的还是上一次的旧表，
+  // 新加的语义全部静默失效，没有任何报错可循。
+  const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) {
     throw new Error(`角色 manifest 加载失败（HTTP ${res.status}）：${characterId}`);
   }

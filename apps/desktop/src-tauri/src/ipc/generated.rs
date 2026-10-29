@@ -45,6 +45,23 @@ pub struct CharacterSummary {
     /// 面板据此把"能播什么"列成按钮：动作组是逐角色不同的资产事实， 面板拿不到文件系统、渲染层才知道自己装了什么， 只有壳扫得到 —— 少这一项，试播按钮就只能写死一组合集， 换角色立刻对不上。
     #[serde(rename = "motionGroups")]
     pub motion_groups: Vec<String>,
+    /// 素材署名（来自角色包的 manifest.credits）。
+    ///
+    /// 为什么要一路带到面板：署名是素材方的条款，必须展示在「关于」页， 而它属于**角色** —— 面板拿不到文件系统，写死在 UI 里又会在换角色时 挂着上一个角色的声明。只有壳扫得到，所以由它带出来。
+    ///
+    /// 展平成三个可选字符串而不是一个可选对象：给 Rust 侧的生成器面对 嵌套可选结构时行为不确定，扁平字段只用到 Option<String> 这种已验证的形态。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "creditAttribution")]
+    pub credit_attribution: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "creditAuthors")]
+    pub credit_authors: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "creditSource")]
+    pub credit_source: Option<String>,
 }
 
 /// 帧预算。'paused' 用于窗口被完全遮挡时。

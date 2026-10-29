@@ -409,6 +409,21 @@ export async function validateCharacterDir(dir: string): Promise<ValidationResul
       result.ok = false;
     }
 
+    // 署名：用了别人的素材就得把声明展示出来，这是素材方的条款，不是可选项。
+    // 资产型角色（有 entry）缺它按 error 拦 —— 缺这一行，分发就是在违约，
+    // 而且它没有任何运行时代价可提示（画面一切正常），只能在这里发现。
+    if (!result.manifest.credits?.attribution) {
+      result.issues.push({
+        level: 'error',
+        code: 'CREDITS_MISSING',
+        path: 'credits.attribution',
+        message:
+          '资产型角色必须带 credits.attribution（素材方要求展示的署名正文）。' +
+          '「关于」页靠它展示声明，缺了就是缺了素材方的署名。',
+      });
+      result.ok = false;
+    }
+
     // 与模型文件对一遍：manifest 与模型对不上时运行时一律静默失效，
     // 这类问题只能在这里拦住
     await crossCheckModel(dir, result.manifest, result.issues);

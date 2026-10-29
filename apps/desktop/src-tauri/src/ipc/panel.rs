@@ -245,11 +245,24 @@ fn scan_characters() -> Vec<CharacterSummary> {
             .map(|m| m.keys().cloned().collect::<Vec<String>>())
             .unwrap_or_default();
 
+        // 署名跟着角色走：面板拿不到文件系统，而「关于」页必须展示它。
+        // 不解析整个 credits 对象，只取三个已知字段 —— 多出来的键留给将来。
+        let credit = |key: &str| -> Option<String> {
+            value
+                .get("credits")
+                .and_then(|c| c.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+
         found.push(CharacterSummary {
             id: id.to_string(),
             display_name,
             kind,
             motion_groups,
+            credit_attribution: credit("attribution"),
+            credit_authors: credit("authors"),
+            credit_source: credit("source"),
         });
     }
 

@@ -114,6 +114,25 @@ export const SemanticsSchema = z
   })
   .strict();
 
+/**
+ * 素材署名。
+ *
+ * 用了别人的素材就要把声明展示出来 —— 这是素材许可证的要求，不是可选项，
+ * 所以正文按素材方给的原文填、一字不改（校验器只要求它非空，不校验措辞，
+ * 因为措辞对不对只能由人来判）。
+ */
+export const CreditsSchema = z
+  .object({
+    /** 必须展示的署名正文 */
+    attribution: z.string().min(1),
+    /** 作者 / 权利人的展示文案，如「插画：Kani Biimu ／ 模型：Live2D」 */
+    authors: z.string().min(1).optional(),
+    /** 出处链接 */
+    source: z.string().min(1).optional(),
+  })
+  .strict();
+export type Credits = z.infer<typeof CreditsSchema>;
+
 export const CharacterManifestSchema = z.object({
   id: z.string().min(1),
   kind: CharacterKindSchema,
@@ -148,6 +167,15 @@ export const CharacterManifestSchema = z.object({
   /** 动作组 → 动作 id 列表。键为 MotionGroup 或 tap_<area> / emote_<emotion> */
   motions: z.record(z.string(), z.array(z.string())).default({}),
   expressions: z.record(z.string(), z.string()).default({}),
+
+  /**
+   * 署名。资产型角色必填（校验器按 error 拦）—— 见 CreditsSchema。
+   *
+   * 为什么放在角色包里：署名是**素材方的条款**，跟着角色走，换角色就换。
+   * 写死在面板 UI 里迟早会出现"换了角色还挂着上一个角色的声明"这种错，
+   * 而那恰恰是许可证上最不能错的一行。
+   */
+  credits: CreditsSchema.optional(),
 
   /** 仅 3D 需要 */
   camera: z

@@ -541,7 +541,41 @@ function MotionButtons() {
  * 使用 Live2D 示例模型时，还必须在此展示官方要求的声明，
  * 文案见 assets/characters/hiyori/NOTICE.md。
  */
+/** 角色包自带的素材署名。署名跟着角色走，见 character-schema 的 CreditsSchema。 */
+interface RoleCredit {
+  id: string;
+  displayName: string;
+  attribution: string;
+  authors?: string;
+  source?: string;
+}
+
 function About() {
+  const [credits, setCredits] = useState<RoleCredit[]>([]);
+
+  useEffect(
+    () =>
+      bindPanelIpc((cmd) => {
+        if (cmd.type !== 'characterList') return;
+        // 列**所有已装角色**的声明，而不只是当前在用的那个：
+        // 分发包里带着这些素材，每一条的声明都不能少。
+        // 写得死在 UI 里的话，换角色就会挂着上一个角色的声明 ——
+        // 而那正是许可证上最不能错的一行。
+        setCredits(
+          cmd.characters
+            .filter((c) => c.creditAttribution)
+            .map((c) => ({
+              id: c.id,
+              displayName: c.displayName,
+              attribution: c.creditAttribution as string,
+              authors: c.creditAuthors,
+              source: c.creditSource,
+            })),
+        );
+      }),
+    [],
+  );
+
   return (
     <div style={aboutCard}>
       <strong>{ABOUT.name}</strong>
@@ -552,6 +586,26 @@ function About() {
         </a>
       </div>
       <div>商业使用须经版权持有人书面授权：{ABOUT.commercialContact}</div>
+
+      {credits.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <strong>角色素材署名</strong>
+          {credits.map((c) => (
+            <div key={c.id} style={{ marginTop: 8 }}>
+              <div>{c.displayName}</div>
+              <div>{c.attribution}</div>
+              {c.authors && <div>{c.authors}</div>}
+              {c.source && (
+                <div>
+                  <a href={c.source} target="_blank" rel="noreferrer">
+                    {c.source}
+                  </a>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

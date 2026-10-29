@@ -120,6 +120,20 @@ export interface CharacterSummary {
    * 换角色立刻对不上。
    */
   motionGroups: string[];
+
+  /**
+   * 素材署名（来自角色包的 manifest.credits）。
+   *
+   * 为什么要一路带到面板：署名是素材方的条款，必须展示在「关于」页，
+   * 而它属于**角色** —— 面板拿不到文件系统，写死在 UI 里又会在换角色时
+   * 挂着上一个角色的声明。只有壳扫得到，所以由它带出来。
+   *
+   * 展平成三个可选字符串而不是一个可选对象：给 Rust 侧的生成器面对
+   * 嵌套可选结构时行为不确定，扁平字段只用到 Option<String> 这种已验证的形态。
+   */
+  creditAttribution?: string;
+  creditAuthors?: string;
+  creditSource?: string;
 }
 
 /**

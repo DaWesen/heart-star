@@ -35,6 +35,11 @@
     "sleep": ["motion/hiyori_m10.motion3.json"]
   },
   "expressions": {},
+  "credits": {
+    "attribution": "本作品的角色在运用株式会社Live2D的著作物素材样本时依据了株式会社Live2D规定的协议。本作品完全根据制作者的自我裁量制作而成。",
+    "authors": "插画 Kani Biimu ／ 模型 Live2D",
+    "source": "https://www.live2d.com/zh-CHS/download/sample-data/"
+  },
   "rig": {
     "type": "none",
     "bones": {},

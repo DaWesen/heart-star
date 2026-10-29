@@ -68,6 +68,10 @@ pub fn run() {
             } else {
                 log_warn!("鼠标钩子未安装，宠物将始终穿透（不可交互）");
             }
+            // 拖拽时的窗口移动线程。必须早于任何拖拽启动 ——
+            // 钩子只写目标位置，这一条才是真正搬窗口的（见其注释）。
+            window::hook::spawn_window_mover();
+
             log!("DPI 缩放 {:.0}%", pet_window.renderer_scale() * 100.0);
 
             // 帧率档位：从磁盘读出上一次用户的取舍，挂成共享状态。
@@ -86,6 +90,8 @@ pub fn run() {
             ipc::spawn_frame_budget_governor(pet.clone(), frame_profile.clone());
             ipc::spawn_gaze_pump(pet.clone());
             ipc::spawn_tap_pump(pet.clone());
+            ipc::spawn_drag_pump(pet.clone());
+            ipc::spawn_render_watchdog(pet.clone());
 
             // 宠物窗口落位诊断。桌宠没有窗口边框也没有任务栏入口，
             // "看不见宠物"时最需要的信息就是它到底在哪、多大、可见与否。
@@ -217,6 +223,7 @@ fn intercept_panel_close(panel: &WebviewWindow) {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             let _ = p.hide();
+            PANEL_OPEN.store(false, Ordering::SeqCst);
         }
     });
 }
@@ -228,7 +235,18 @@ struct SyncedState {
     /// 缩放系数 × 1000。用整数毫倍而不是 f64：浮点直接当状态比较会有精度噪声，
     /// 那会导致每轮都被判成"变了"，白白重发。
     scale_milli: u32,
+    /// 此刻该不该浮在其他窗口之上
+    topmost: bool,
 }
+
+/// 面板是否正开着。**由我们自己维护**，不查窗口的可见性。
+///
+/// 一开始这里问的是 `panel.is_visible()`，结果宠物再也不置顶了：
+/// 面板是隐藏创建的，而窗口的可见性在"隐藏但已创建"这一态上并不可靠，
+/// 一旦被报成可见，宠物就永远让着位，被其他窗口盖住 ——
+/// 桌宠被盖住等于不存在。显示与隐藏本来就都走我们自己的代码，
+/// 直接记一个标志比回头问窗口准得多。
+static PANEL_OPEN: AtomicBool = AtomicBool::new(false);
 
 /// 形态监管线程。
 ///
@@ -392,21 +410,24 @@ fn sync_renderer(app: &AppHandle, pet: &window::PetWindow, last: &mut Option<Syn
     let current = SyncedState {
         form: pet.form(),
         scale_milli: (pet.renderer_scale() * 1000.0).round() as u32,
+        // 桌面形态浮在所有窗口之上；进了面板必须让位（子窗口带 TOPMOST 会让
+        // Z 序表现异常，可能盖住面板自己的 UI）；面板开着时再让一步，理由见 PANEL_OPEN
+        topmost: matches!(pet.form(), Form::Desktop) && !PANEL_OPEN.load(Ordering::SeqCst),
     };
     if *last == Some(current) {
         return;
     }
-    let form_changed = last.as_ref().map(|s| s.form) != Some(current.form);
+    let topmost_changed = last.as_ref().map(|s| s.topmost) != Some(current.topmost);
     *last = Some(current);
 
     let Some(window) = app.get_webview_window("pet") else {
         return;
     };
 
-    // 置顶要跟着形态走：桌面形态得浮在其他窗口之上；进了面板就必须让位，
-    // 子窗口带 TOPMOST 会让 Z 序表现异常（可能盖住面板自己的 UI）。
-    if form_changed {
-        let _ = window.set_always_on_top(matches!(current.form, Form::Desktop));
+    if topmost_changed {
+        // 留痕：桌宠被别的窗口盖住等于不存在，而那一态没有任何报错可循
+        log!("宠物置顶 -> {}", current.topmost);
+        let _ = window.set_always_on_top(current.topmost);
     }
 
     ipc::announce(&window, form);
@@ -422,6 +443,7 @@ pub(crate) fn show_panel(app: &AppHandle) {
     let Some(panel) = app.get_webview_window(PANEL_LABEL) else {
         return;
     };
+    PANEL_OPEN.store(true, Ordering::SeqCst);
     let _ = panel.show();
     let _ = panel.set_focus();
     // 每次显示都补发一次角色列表：面板页面可能被 HMR 重载，

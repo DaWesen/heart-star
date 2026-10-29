@@ -102,6 +102,16 @@ fn handle_event(app: &AppHandle, evt: PanelEvent) {
         } => {
             apply_frame_profile(app, active_fps, idle_fps);
         }
+        PanelEvent::PlayMotion { group } => {
+            let Some(pet) = app.get_webview_window(PET_LABEL) else {
+                log_warn!("宠物窗口不存在，忽略动作请求");
+                return;
+            };
+            log!("面板请求动作 -> {group}");
+            if let Err(e) = send(&pet, &ShellCommand::PlayMotion { group }) {
+                log_warn!("动作下发失败: {e}");
+            }
+        }
     }
 }
 
@@ -227,10 +237,19 @@ fn scan_characters() -> Vec<CharacterSummary> {
             .unwrap_or(id)
             .to_string();
 
+        // 动作组：取 manifest.motions 的键。只取键不取动作文件 ——
+        // 面板要的是"有哪几种互动可以点播"，文件清单是渲染层的事。
+        let motion_groups = value
+            .get("motions")
+            .and_then(Value::as_object)
+            .map(|m| m.keys().cloned().collect::<Vec<String>>())
+            .unwrap_or_default();
+
         found.push(CharacterSummary {
             id: id.to_string(),
             display_name,
             kind,
+            motion_groups,
         });
     }
 

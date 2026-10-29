@@ -15,16 +15,17 @@
 //!
 //! 另注：全局钩子易被杀软误报，必须配 EV 代码签名证书。
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetWindowRect, SetWindowPos, SetWindowsHookExW,
-    UnhookWindowsHookEx, HHOOK, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WH_MOUSE_LL,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    UnhookWindowsHookEx, HHOOK, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
 };
 
 use super::WindowError;
@@ -37,10 +38,80 @@ struct HookState {
     transparent: bool,
     /// 拖拽中
     dragging: bool,
+    /// 这次按下**真的拖动过**（越过 slop 阈值）。单击一下不算 —— 见 drag_move
+    dragged: bool,
     /// 拖拽起点：光标位置与窗口左上角，用于计算位移
     origin_cursor: (i32, i32),
     origin_window: (i32, i32),
 }
+
+/// 窗口句柄的原子副本。移动线程要用它，但不能为此去抢 `HOOK_STATE` 的锁 ——
+/// 那把锁在每条鼠标消息上都要过一遍，多一个高频竞争者只会平添争用。
+static HWND_RAW: AtomicIsize = AtomicIsize::new(0);
+
+/// 待应用的窗口位置（屏幕物理像素）。
+///
+/// 钩子只负责**写**目标位置，真正的 `SetWindowPos` 由 `spawn_window_mover`
+/// 那条线程做 —— 理由见那里的注释。
+static PENDING_X: AtomicI32 = AtomicI32::new(0);
+static PENDING_Y: AtomicI32 = AtomicI32::new(0);
+/// 是否有尚未落地的移动。采用"最新值覆盖"而不是排队：
+/// 位置只认最后算出来的那个，中间的都过期了。
+static PENDING_MOVE: AtomicBool = AtomicBool::new(false);
+
+/// 移动线程的应用间隔。
+///
+/// 60Hz 的窗口移动肉眼已经完全连续 —— 关键是它**恒定**：
+/// 无论鼠标每秒发 100 条还是 1000 条消息，窗口都只按这个节奏动，
+/// 鼠标消息洪流被彻底挡在窗口之外。
+const WINDOW_MOVE_INTERVAL_MS: u64 = 16;
+
+/// 拖拽窗口的移动线程。启动时调一次。
+///
+/// 为什么不在钩子里直接 `SetWindowPos`：钩子回调位于全局鼠标消息路径上，
+/// 在里面搬窗口等于让"每动一下鼠标"都触发一次跨进程合成 ——
+/// 透明 + 分层的 WebView2 每动一次都要重新合成一层，
+/// 实测十几次拖拽就能把渲染进程压崩（日志上是 window_impl.cc 报错 + renderer 退出）。
+///
+/// 挪到独立线程之后，钩子这一侧只剩两个原子写，
+/// 而窗口移动天然被合并成恒定 60Hz、且每次都用最新坐标。
+pub fn spawn_window_mover() {
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_millis(WINDOW_MOVE_INTERVAL_MS));
+
+        if !PENDING_MOVE.swap(false, Ordering::SeqCst) {
+            continue;
+        }
+        let raw = HWND_RAW.load(Ordering::SeqCst);
+        if raw == 0 {
+            continue;
+        }
+        let x = PENDING_X.load(Ordering::SeqCst);
+        let y = PENDING_Y.load(Ordering::SeqCst);
+
+        unsafe {
+            let _ = SetWindowPos(
+                to_hwnd(raw),
+                None,
+                x,
+                y,
+                0,
+                0,
+                // ASYNCWINDOWPOS：不等这次移动真正生效就返回。
+                // 窗口属于主线程，同步等待会把本线程挂到主线程的消息处理上，
+                // 而此刻主线程很可能正因为别的事卡着 —— 那正是一处死锁。
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            );
+        }
+    });
+}
+
+/// 位移超过这么多物理像素才算"在拖"，不是"手抖了一下"。
+///
+/// 没有这个阈值的话，单击也会先触发一次"被拎起来"：
+/// 按下到松开之间光标常常有一两个像素的位移，
+/// 于是摸一下她会同时播"被摸"和"被拎起来"两个动作，看起来像抽搐。
+const DRAG_SLOP_PX: i32 = 4;
 
 static HOOK_STATE: Mutex<Option<HookState>> = Mutex::new(None);
 
@@ -132,6 +203,36 @@ pub fn request_toggle() {
 /// 线程没有意义，而阻塞在 recv 上既零开销又是立刻响应的。
 static TAP_TX: Mutex<Option<Sender<(i32, i32)>>> = Mutex::new(None);
 
+/// 拖拽的两个阶段 —— 宠物被鼠标"拎起来"和"放下去"。
+///
+/// 为什么要单独报：这是桌宠独有的交互，动作上必须和"被摸一下"区分开。
+/// 都塞进 tap 的话，上层再也分不清用户是想摸她还是想挪她。
+#[derive(Clone, Copy, Debug)]
+pub enum DragPhase {
+    Grab,
+    Drop,
+}
+
+/// 拖拽阶段上报通道。与点击同理：钩子拿不到 AppHandle，只能投递。
+static DRAG_TX: Mutex<Option<Sender<DragPhase>>> = Mutex::new(None);
+
+/// 取走拖拽接收端。**只能调用一次**（启动时）。
+pub fn take_drag_receiver() -> Receiver<DragPhase> {
+    let (tx, rx) = channel::<DragPhase>();
+    if let Ok(mut guard) = DRAG_TX.lock() {
+        *guard = Some(tx);
+    }
+    rx
+}
+
+fn request_drag(phase: DragPhase) {
+    if let Ok(guard) = DRAG_TX.lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(phase);
+        }
+    }
+}
+
 /// 取走点击接收端。**只能调用一次**（启动时）。
 pub fn take_tap_receiver() -> Receiver<(i32, i32)> {
     let (tx, rx) = channel::<(i32, i32)>();
@@ -179,11 +280,14 @@ pub fn install(hwnd: HWND) -> Result<HookHandle, WindowError> {
             .map_err(|_| WindowError::HookFailed)?
     };
 
+    HWND_RAW.store(hwnd.0 as isize, Ordering::SeqCst);
+
     *state = Some(HookState {
         hwnd: hwnd.0 as isize,
         // 桌面形态下窗口是穿透的，以此为初始态
         transparent: true,
         dragging: false,
+        dragged: false,
         origin_cursor: (0, 0),
         origin_window: (0, 0),
     });
@@ -199,9 +303,23 @@ pub fn uninstall(handle: HookHandle) {
     unsafe {
         let _ = UnhookWindowsHookEx(handle.0);
     }
+
+    // 拖拽**中途**卸载钩子（切面板形态）时必须补发一次"被放下"：
+    // 钩子没了就再也收不到 WM_LBUTTONUP，而"被拎起来"是个循环动作 ——
+    // 少了这一下她会永远挂在半空晃，只有再摸她一下才能落地。
+    let mut held = false;
     if let Ok(mut state) = HOOK_STATE.lock() {
+        if let Some(s) = state.as_ref() {
+            held = s.dragging && s.dragged;
+        }
         *state = None;
     }
+    if held {
+        request_drag(DragPhase::Drop);
+    }
+    // 面板形态下窗口是宿主的子窗口，由宿主摆位，不该再由拖拽线程挪动
+    HWND_RAW.store(0, Ordering::SeqCst);
+    PENDING_MOVE.store(false, Ordering::SeqCst);
     // 钩子没了就没有指针来源了，视线该归正而不是停在最后一次的方向上 ——
     // 否则宠物在面板里会一直斜眼看着用户刚才待过的地方。
     CURSOR_VALID.store(false, Ordering::Relaxed);
@@ -290,6 +408,7 @@ fn begin_drag() -> Result<(), ()> {
     }
 
     state.dragging = true;
+    state.dragged = false;
     state.origin_cursor = (pt.x, pt.y);
     state.origin_window = (rect.left, rect.top);
     Ok(())
@@ -301,34 +420,49 @@ fn drag_move() -> Result<(), ()> {
         GetCursorPos(&mut pt).map_err(|_| ())?;
     }
 
-    let guard = HOOK_STATE.lock().map_err(|_| ())?;
-    let state = guard.as_ref().ok_or(())?;
+    let mut guard = HOOK_STATE.lock().map_err(|_| ())?;
+    let state = guard.as_mut().ok_or(())?;
     if !state.dragging {
         return Ok(());
     }
-    let hwnd = to_hwnd(state.hwnd);
+
+    // "被拎起来"只在越过 slop 时上报一次 —— 见 DRAG_SLOP_PX 的注释。
+    // 放在这里而不是 begin_drag：按下那一刻还不知道用户是要摸她还是挪她。
+    if !state.dragged {
+        let dx = pt.x - state.origin_cursor.0;
+        let dy = pt.y - state.origin_cursor.1;
+        if dx.abs() >= DRAG_SLOP_PX || dy.abs() >= DRAG_SLOP_PX {
+            state.dragged = true;
+            request_drag(DragPhase::Grab);
+        }
+    }
+
+    // 这里**只记下目标位置**，真正的 SetWindowPos 由 spawn_window_mover 那条线程做。
+    // 钩子里不做窗口操作的原因见该函数：它在全局鼠标消息路径上，
+    // 而搬一个透明分层窗口是一次跨进程合成，每秒上百次会把渲染进程压崩。
+    //
+    // 中间消息被覆盖不会丢精度：位置是从**当前光标**算的，
+    // 移动线程每次取的又是最新的目标值，等于天然合帧。
     let x = state.origin_window.0 + (pt.x - state.origin_cursor.0);
     let y = state.origin_window.1 + (pt.y - state.origin_cursor.1);
     drop(guard);
 
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
+    PENDING_X.store(x, Ordering::SeqCst);
+    PENDING_Y.store(y, Ordering::SeqCst);
+    PENDING_MOVE.store(true, Ordering::SeqCst);
     Ok(())
 }
 
 fn end_drag() -> Result<(), ()> {
     let mut guard = HOOK_STATE.lock().map_err(|_| ())?;
     if let Some(state) = guard.as_mut() {
+        // 只有真的拖动过才报"被放下"：光是按一下再松开不该有这一下，
+        // 否则每次摸她都会跟一个放下的动作
+        if state.dragged {
+            request_drag(DragPhase::Drop);
+        }
         state.dragging = false;
+        state.dragged = false;
     }
     Ok(())
 }

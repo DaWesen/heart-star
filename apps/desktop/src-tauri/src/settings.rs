@@ -71,6 +71,14 @@ fn clamp_fps(value: f64) -> f64 {
 
 const FILE_NAME: &str = "settings.json";
 
+/// 上次在用的角色 id，纯文本。
+///
+/// 为什么单独一个文件、不塞进 settings.json：角色是"每切一次就写一次"的
+/// 状态，帧率是"用户改了才写"的偏好。两者合一份文件的话，任何一方保存
+/// 都得先读出另一方再整份写回，两个写入点互相覆盖只是时间问题。
+/// 这里只有一个字符串，为它套一层 JSON 也没有意义。
+const CHARACTER_FILE: &str = "last-character.txt";
+
 /// 读出偏好。读不到就用默认值 —— 首次启动、文件损坏都是这条路径。
 pub fn load(app: &AppHandle) -> FrameProfile {
     let Ok(dir) = app.path().app_data_dir() else {
@@ -109,6 +117,36 @@ pub fn save(app: &AppHandle, profile: &FrameProfile) {
             }
         }
         Err(e) => log_warn!("偏好序列化失败: {e}"),
+    }
+}
+
+/// 读出上次在用的角色。
+///
+/// 必须记它的理由：重启之后（包括看门狗那条"救不回来就重启"的兜底）
+/// 渲染层两手空空，不补回去的话桌宠会变回占位方块 ——
+/// 上一次明明还在的角色凭空消失，用户只会以为程序坏了。
+pub fn load_character(app: &AppHandle) -> Option<String> {
+    let dir = app.path().app_data_dir().ok()?;
+    let text = std::fs::read_to_string(dir.join(CHARACTER_FILE)).ok()?;
+    let id = text.trim().to_string();
+    if id.is_empty() {
+        return None;
+    }
+    Some(id)
+}
+
+/// 记下当前在用的角色。失败只记警告：记不上只影响下次启动的初值。
+pub fn save_character(app: &AppHandle, character_id: &str) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        log_warn!("取不到 app data 目录，当前角色未记录");
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log_warn!("创建 {} 失败，当前角色未记录: {e}", dir.display());
+        return;
+    }
+    if let Err(e) = std::fs::write(dir.join(CHARACTER_FILE), character_id) {
+        log_warn!("写入当前角色失败: {e}");
     }
 }
 
